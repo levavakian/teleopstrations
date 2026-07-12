@@ -379,17 +379,25 @@ function RoomHeader({
 function PlayerList({
   state,
   compact = false,
+  showJoinOrder = false,
+  onKick,
 }: {
   state: RoomState
   compact?: boolean
+  showJoinOrder?: boolean
+  onKick?: (playerId: string) => void
 }) {
   const submitted = new Set(
     Object.values(state.round?.assignments ?? {})
       .filter((assignment) => assignment.submission)
       .map((assignment) => assignment.playerId),
   )
-  const order = state.round?.order ?? state.joinOrder
-  const pending = state.joinOrder.filter((id) => !order.includes(id))
+  const order = showJoinOrder
+    ? state.joinOrder
+    : (state.round?.order ?? state.joinOrder)
+  const pending = showJoinOrder
+    ? []
+    : state.joinOrder.filter((id) => !order.includes(id))
 
   const renderPlayer = (playerId: string, pendingPlayer = false) => {
     const player = state.players[playerId]
@@ -410,7 +418,18 @@ function PlayerList({
             {!player.connected ? 'Disconnected' : null}
           </small>
         </span>
-        {state.phase === 'stage' && !pendingPlayer ? (
+        {onKick &&
+        playerId !== state.adminId &&
+        playerId !== state.creatorId ? (
+          <button
+            className="kick-player"
+            type="button"
+            aria-label={`Kick ${player.name}`}
+            onClick={() => onKick(playerId)}
+          >
+            Kick
+          </button>
+        ) : state.phase === 'stage' && !pendingPlayer ? (
           <span
             className={`submit-mark${submitted.has(playerId) ? ' is-done' : ''}`}
             aria-label={submitted.has(playerId) ? 'Submitted' : 'Still working'}
@@ -556,6 +575,24 @@ function Lobby({
                 {MIN_PLAYERS - connected === 1 ? 'player' : 'players'}.
               </small>
             ) : null}
+            <div className="room-danger-row">
+              <span>Closing removes the room for everyone.</span>
+              <button
+                className="button button--danger-quiet"
+                type="button"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      'Close this room for everyone? The current game will be deleted.',
+                    )
+                  ) {
+                    sendControl({type: 'close-room'})
+                  }
+                }}
+              >
+                Close room
+              </button>
+            </div>
           </div>
         ) : (
           <div className="waiting-note">
@@ -576,7 +613,23 @@ function Lobby({
           </div>
           <span>{connected}/{state.joinOrder.length}</span>
         </div>
-        <PlayerList state={state} />
+        <PlayerList
+          state={state}
+          onKick={
+            canAdmin
+              ? (playerId) => {
+                  const name = state.players[playerId]?.name ?? 'this player'
+                  if (
+                    window.confirm(
+                      `Kick ${name}? They cannot rejoin with the same name.`,
+                    )
+                  ) {
+                    sendControl({type: 'kick-player', playerId})
+                  }
+                }
+              : undefined
+          }
+        />
         <p className="roster-note">
           <span aria-hidden="true">⤨</span>
           The order shown here is shuffled when each round begins.
@@ -840,7 +893,9 @@ function Stage({
       <div className="stage-progress">
         <div>
           <strong>{submittedCount}</strong> of {round.order.length} submitted
-          <small>You can keep editing and resubmit until time expires.</small>
+          <small>
+            You can resubmit until time expires or everyone is ready.
+          </small>
         </div>
         <div className="progress-track">
           <span
@@ -850,17 +905,49 @@ function Stage({
           />
         </div>
         {canAdmin ? (
-          <button
-            className="button button--danger-quiet"
-            type="button"
-            onClick={() => {
-              if (window.confirm('Close this stage for everyone now?')) {
-                sendControl({type: 'force-advance'})
-              }
-            }}
-          >
-            Force next stage
-          </button>
+          <div className="admin-stage-actions">
+            <button
+              className="button button--quiet"
+              type="button"
+              onClick={() => {
+                if (window.confirm('Close this stage for everyone now?')) {
+                  sendControl({type: 'force-advance'})
+                }
+              }}
+            >
+              Next stage
+            </button>
+            <button
+              className="button button--danger-quiet"
+              type="button"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    'End this round now? Current work will be finalized and revealed.',
+                  )
+                ) {
+                  sendControl({type: 'end-round'})
+                }
+              }}
+            >
+              End round
+            </button>
+            <button
+              className="button button--danger-quiet"
+              type="button"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    'Close this room for everyone? The current game will be deleted.',
+                  )
+                ) {
+                  sendControl({type: 'close-room'})
+                }
+              }}
+            >
+              Close room
+            </button>
+          </div>
         ) : null}
       </div>
 
@@ -938,6 +1025,23 @@ function Reveal({
               ? 'You have the controls. Take everyone through the story.'
               : `${owner.name} is presenting this beautiful disaster.`}
           </p>
+          {canAdmin ? (
+            <button
+              className="button button--danger-quiet reveal-close"
+              type="button"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    'Close this room for everyone? The current game will be deleted.',
+                  )
+                ) {
+                  sendControl({type: 'close-room'})
+                }
+              }}
+            >
+              Close room
+            </button>
+          ) : null}
         </div>
         <div className="presenter-badge">
           <span>{owner.name.slice(0, 1).toUpperCase()}</span>
@@ -1045,6 +1149,31 @@ function Reveal({
                   sendControl({type: 'settings', settings})
                 }
               />
+              <div className="round-roster-manager">
+                <div className="section-heading">
+                  <div>
+                    <span className="step-label">Next round</span>
+                    <h3>Manage players</h3>
+                  </div>
+                  <span>{connected}</span>
+                </div>
+                <PlayerList
+                  state={state}
+                  compact
+                  showJoinOrder
+                  onKick={(playerId) => {
+                    const name =
+                      state.players[playerId]?.name ?? 'this player'
+                    if (
+                      window.confirm(
+                        `Kick ${name}? They cannot rejoin with the same name.`,
+                      )
+                    ) {
+                      sendControl({type: 'kick-player', playerId})
+                    }
+                  }}
+                />
+              </div>
               <div className="round-complete__actions">
                 <button
                   className="button button--quiet"
@@ -1068,6 +1197,21 @@ function Reveal({
                   onClick={() => sendControl({type: 'start-round'})}
                 >
                   Shuffle & start next round
+                </button>
+                <button
+                  className="button button--danger-quiet"
+                  type="button"
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        'Close this room for everyone? The current game will be deleted.',
+                      )
+                    ) {
+                      sendControl({type: 'close-room'})
+                    }
+                  }}
+                >
+                  Close room
                 </button>
               </div>
             </>
@@ -1116,6 +1260,7 @@ function Room({
 
   const recognized =
     state.players[config.player.id]?.sessionId === config.player.sessionId
+  const wasKicked = state.blockedPlayerIds.includes(config.player.id)
 
   return (
     <div className="room-shell">
@@ -1131,7 +1276,38 @@ function Room({
           Connection notice: {connection.error}
         </div>
       ) : null}
-      {!recognized ? (
+      {state.phase === 'closed' ? (
+        <main className="connection-page connection-page--in-room">
+          <div className="connection-card room-ended-card">
+            <span className="room-ended-card__icon" aria-hidden="true">
+              ×
+            </span>
+            <span className="step-label">Room closed</span>
+            <h1>This room has been shut down</h1>
+            <p>
+              The admin deleted the active game. Create a fresh room to play
+              again.
+            </p>
+            <button className="button button--primary" type="button" onClick={exit}>
+              Back to home
+            </button>
+          </div>
+        </main>
+      ) : wasKicked ? (
+        <main className="connection-page connection-page--in-room">
+          <div className="connection-card room-ended-card">
+            <span className="room-ended-card__icon" aria-hidden="true">
+              →
+            </span>
+            <span className="step-label">Removed from room</span>
+            <h1>You’ve been removed from this room</h1>
+            <p>The admin removed this name from the next-round roster.</p>
+            <button className="button button--primary" type="button" onClick={exit}>
+              Back to home
+            </button>
+          </div>
+        </main>
+      ) : !recognized ? (
         <main className="connection-page connection-page--in-room">
           <div className="connection-card">
             <div className="orbit-loader" aria-hidden="true">

@@ -7,6 +7,8 @@ import {
   createId,
   createInitialRoom,
   electAdmin,
+  getSubmissionCount,
+  hydrateRoomState,
   intentForCandidate,
   joinPlayer,
   mergeReplica,
@@ -51,7 +53,7 @@ function loadCachedState(config: RoomSessionConfig): RoomState | null {
     ) {
       return null
     }
-    return joinPlayer(cached, config.player)
+    return joinPlayer(hydrateRoomState(cached), config.player)
   } catch {
     return null
   }
@@ -156,12 +158,24 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
           const oldest = seenIntentIdsRef.current.values().next().value
           if (oldest) seenIntentIdsRef.current.delete(oldest)
         }
-        const next = applyIntent(current, envelope, Date.now())
+        const now = Date.now()
+        let next = applyIntent(current, envelope, now)
+        if (
+          envelope.intent.type === 'submit' &&
+          next.phase === 'stage' &&
+          next.round &&
+          getSubmissionCount(next) === next.round.order.length
+        ) {
+          next = advanceStage(next, now)
+        }
         if (next !== current) {
           const isCandidate =
             envelope.intent.type === 'draft' ||
             envelope.intent.type === 'submit'
-          publishState(next, !isCandidate)
+          const stageTransitioned =
+            next.phase !== current.phase ||
+            next.round?.stageIndex !== current.round?.stageIndex
+          publishState(next, !isCandidate || stageTransitioned)
         }
       } else {
         const next = applyBackupIntent(current, envelope)
@@ -253,10 +267,11 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         message.state.roomCode === config.roomCode
       ) {
         const previous = stateRef.current
-        const next = mergeReplica(previous, message.state)
+        const incoming = hydrateRoomState(message.state)
+        const next = mergeReplica(previous, incoming)
         if (
-          next.adminId === message.state.adminId &&
-          next.adminEpoch === message.state.adminEpoch
+          next.adminId === incoming.adminId &&
+          next.adminEpoch === incoming.adminEpoch
         ) {
           adminLastSeenRef.current = Date.now()
           const sample = message.sentAt - Date.now()
@@ -360,7 +375,9 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         if (
           presenceState.phase === 'stage' &&
           presenceState.round &&
-          now >= presenceState.round.deadline
+          (getSubmissionCount(presenceState) ===
+            presenceState.round.order.length ||
+            now >= presenceState.round.deadline)
         ) {
           publishState(advanceStage(presenceState, now))
           return
@@ -448,8 +465,10 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
       if (request.type === 'settings') {
         intent = request
+      } else if (request.type === 'close-room') {
+        intent = {type: 'close-room', roomCode: current.roomCode}
       } else if (request.type === 'start-round') {
-        if (current.phase === 'stage') return
+        if (current.phase !== 'lobby' && current.phase !== 'reveal') return
         intent = {
           type: 'start-round',
           expectedPhase: current.phase,
@@ -461,6 +480,30 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
           type: 'force-advance',
           roundId: current.round.id,
           stageIndex: current.round.stageIndex,
+        }
+      } else if (request.type === 'end-round') {
+        if (current.phase !== 'stage' || !current.round) return
+        intent = {
+          type: 'end-round',
+          roundId: current.round.id,
+          stageIndex: current.round.stageIndex,
+        }
+      } else if (request.type === 'kick-player') {
+        if (
+          current.phase !== 'lobby' &&
+          !(
+            current.phase === 'reveal' &&
+            current.round?.reveal?.complete
+          )
+        ) {
+          return
+        }
+        intent = {
+          type: 'kick-player',
+          playerId: request.playerId,
+          expectedPhase:
+            current.phase === 'lobby' ? 'lobby' : 'reveal',
+          previousRoundId: current.round?.id ?? null,
         }
       } else if (
         request.type === 'reveal-page' ||

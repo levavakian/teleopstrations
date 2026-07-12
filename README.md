@@ -30,10 +30,12 @@ For deterministic same-browser development without public signaling, append
 5. Each prompt owner presents their playbook, with the room creator sharing
    reveal controls.
 
-Submissions may be replaced until the deadline. If an opening prompt is still
-empty, the game creates the configured player-name fallback. Every peer keeps a
-replica of room state; if the admin disappears, the next connected player in
-the frozen order takes over.
+Submissions may be replaced until the deadline or until everyone has submitted,
+which advances the stage immediately. If an opening prompt is still empty, the
+game creates the configured player-name fallback. Every peer keeps a replica of
+room state; if the admin disappears, the next connected player in the frozen
+order takes over. Admins can end a round early, kick players between rounds, or
+close the room for all connected peers.
 
 ## Commands
 
@@ -59,3 +61,5 @@ There is intentionally no configured maximum player count, but browser
 full-mesh WebRTC and full-state replication impose practical device/network
 limits. This is a trusted party game: name-only rejoining and replicated hidden
 content are not designed to resist malicious players.
+Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
+clears its round, while permanent deletion cannot exist without a server.

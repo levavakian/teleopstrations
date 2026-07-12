@@ -59,6 +59,20 @@ export function isValidSettings(settings: GameSettings): boolean {
   )
 }
 
+export function hydrateRoomState(state: RoomState): RoomState {
+  if (
+    Array.isArray(state.blockedPlayerIds) &&
+    (state.closedAt === null || typeof state.closedAt === 'number')
+  ) {
+    return state
+  }
+  return {
+    ...state,
+    blockedPlayerIds: state.blockedPlayerIds ?? [],
+    closedAt: state.closedAt ?? null,
+  }
+}
+
 function copyState(state: RoomState): RoomState {
   return structuredClone(state)
 }
@@ -132,6 +146,8 @@ export function createInitialRoom(
     settings,
     players: {[creator.id]: player},
     joinOrder: [creator.id],
+    blockedPlayerIds: [],
+    closedAt: null,
     phase: 'lobby',
     round: null,
   }
@@ -141,6 +157,12 @@ export function joinPlayer(
   state: RoomState,
   session: PlayerSession,
 ): RoomState {
+  if (
+    state.phase === 'closed' ||
+    state.blockedPlayerIds.includes(session.id)
+  ) {
+    return state
+  }
   const next = copyState(state)
   const existing = next.players[session.id]
 
@@ -317,10 +339,20 @@ export function applyIntent(
     return applyCandidate(state, envelope, intent.type, true)
   }
 
+  if (intent.type === 'close-room') {
+    return isAdminControl(state, envelope.senderId) &&
+      intent.roomCode === state.roomCode
+      ? closeRoom(state, now)
+      : state
+  }
+
   if (intent.type === 'settings') {
+    const betweenRounds =
+      state.phase === 'lobby' ||
+      (state.phase === 'reveal' && Boolean(state.round?.reveal?.complete))
     if (
       !isAdminControl(state, envelope.senderId) ||
-      state.phase === 'stage' ||
+      !betweenRounds ||
       !isValidSettings(intent.settings)
     ) {
       return state
@@ -351,6 +383,29 @@ export function applyIntent(
       state.round?.id === intent.roundId &&
       state.round.stageIndex === intent.stageIndex
       ? advanceStage(state, now)
+      : state
+  }
+
+  if (intent.type === 'end-round') {
+    return isAdminControl(state, envelope.senderId) &&
+      state.phase === 'stage' &&
+      state.round?.id === intent.roundId &&
+      state.round.stageIndex === intent.stageIndex
+      ? endRound(state)
+      : state
+  }
+
+  if (intent.type === 'kick-player') {
+    const validPhase =
+      (state.phase === 'lobby' &&
+        intent.expectedPhase === 'lobby' &&
+        intent.previousRoundId === null) ||
+      (state.phase === 'reveal' &&
+        state.round?.reveal?.complete &&
+        intent.expectedPhase === 'reveal' &&
+        intent.previousRoundId === state.round.id)
+    return isAdminControl(state, envelope.senderId) && validPhase
+      ? kickPlayer(state, intent.playerId)
       : state
   }
 
@@ -479,19 +534,18 @@ function finalizedContent(
   return {content: blankContent(assignment.kind), source: 'blank'}
 }
 
-export function advanceStage(state: RoomState, now: number): RoomState {
-  if (state.phase !== 'stage' || !state.round) return state
-  if (
-    Object.values(state.round.books).some((book) =>
-      book.entries.some(
-        ({stageIndex}) => stageIndex === state.round!.stageIndex,
+function currentStageIsFinalized(state: RoomState): boolean {
+  return Boolean(
+    state.round &&
+      Object.values(state.round.books).some((book) =>
+        book.entries.some(
+          ({stageIndex}) => stageIndex === state.round!.stageIndex,
+        ),
       ),
-    )
-  ) {
-    return state
-  }
+  )
+}
 
-  const next = copyState(state)
+function finalizeCurrentStage(next: RoomState): void {
   const round = next.round!
   const completedStage = round.stageIndex
 
@@ -504,18 +558,88 @@ export function advanceStage(state: RoomState, now: number): RoomState {
       ...result,
     })
   }
+}
+
+function enterReveal(next: RoomState): void {
+  next.phase = 'reveal'
+  next.round!.deadline = 0
+  next.round!.assignments = {}
+  next.round!.reveal = {bookIndex: 0, pageIndex: 0, complete: false}
+}
+
+export function advanceStage(state: RoomState, now: number): RoomState {
+  if (
+    state.phase !== 'stage' ||
+    !state.round ||
+    currentStageIsFinalized(state)
+  ) {
+    return state
+  }
+
+  const next = copyState(state)
+  const round = next.round!
+  const completedStage = round.stageIndex
+  finalizeCurrentStage(next)
 
   if (completedStage >= round.order.length - 1) {
-    next.phase = 'reveal'
-    round.deadline = 0
-    round.assignments = {}
-    round.reveal = {bookIndex: 0, pageIndex: 0, complete: false}
+    enterReveal(next)
   } else {
     round.stageIndex += 1
     round.assignments = makeAssignments(round.order, round.stageIndex)
     round.deadline = now + stageDuration(next, round.stageIndex)
   }
 
+  next.revision += 1
+  return next
+}
+
+export function endRound(state: RoomState): RoomState {
+  if (
+    state.phase !== 'stage' ||
+    !state.round ||
+    currentStageIsFinalized(state)
+  ) {
+    return state
+  }
+  const next = copyState(state)
+  finalizeCurrentStage(next)
+  enterReveal(next)
+  next.revision += 1
+  return next
+}
+
+export function kickPlayer(
+  state: RoomState,
+  playerId: PlayerId,
+): RoomState {
+  const betweenRounds =
+    state.phase === 'lobby' ||
+    (state.phase === 'reveal' && Boolean(state.round?.reveal?.complete))
+  if (
+    !betweenRounds ||
+    !state.players[playerId] ||
+    playerId === state.adminId ||
+    playerId === state.creatorId
+  ) {
+    return state
+  }
+
+  const next = copyState(state)
+  next.players[playerId].connected = false
+  next.joinOrder = next.joinOrder.filter((id) => id !== playerId)
+  if (!next.blockedPlayerIds.includes(playerId)) {
+    next.blockedPlayerIds.push(playerId)
+  }
+  next.revision += 1
+  return next
+}
+
+export function closeRoom(state: RoomState, now: number): RoomState {
+  if (state.phase === 'closed') return state
+  const next = copyState(state)
+  next.phase = 'closed'
+  next.round = null
+  next.closedAt = now
   next.revision += 1
   return next
 }

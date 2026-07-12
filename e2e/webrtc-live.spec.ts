@@ -1,5 +1,9 @@
 import {expect, test, type BrowserContext, type Page} from '@playwright/test'
 
+test.describe.configure({
+  retries: process.env.LIVE_WEBRTC === '1' ? 1 : 0,
+})
+
 test.skip(
   process.env.LIVE_WEBRTC !== '1',
   'Set LIVE_WEBRTC=1 to exercise public Nostr signaling and real WebRTC.',

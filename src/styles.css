@@ -579,6 +579,21 @@ textarea::placeholder {
   letter-spacing: -0.04em;
 }
 
+.room-danger-row {
+  display: flex;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.room-danger-row > span {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
 .settings-editor {
   display: grid;
   margin-bottom: 1rem;
@@ -710,6 +725,23 @@ textarea::placeholder {
 .submit-mark.is-done {
   background: rgb(46 157 102 / 13%);
   color: var(--green);
+}
+
+.kick-player {
+  padding: 0.32rem 0.5rem;
+  border: 1px solid rgb(241 91 67 / 30%);
+  border-radius: 0.35rem;
+  background: rgb(241 91 67 / 7%);
+  color: var(--coral-dark);
+  cursor: pointer;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.55rem;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.kick-player:hover {
+  background: rgb(241 91 67 / 14%);
 }
 
 .player-list__divider {
@@ -853,6 +885,28 @@ textarea::placeholder {
   font-size: 0.62rem;
 }
 
+.admin-stage-actions {
+  position: fixed;
+  z-index: 30;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  padding: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+  box-shadow: 0 10px 35px rgb(52 42 28 / 16%);
+  justify-content: flex-end;
+  gap: 0.4rem;
+  background: rgb(255 253 248 / 95%);
+  backdrop-filter: blur(10px);
+}
+
+.admin-stage-actions .button {
+  min-height: 2.35rem;
+  padding: 0.55rem 0.7rem;
+  white-space: nowrap;
+}
+
 .progress-track {
   height: 0.35rem;
   overflow: hidden;
@@ -912,6 +966,13 @@ textarea::placeholder {
   overflow: hidden;
 }
 
+.text-workbench:focus-within {
+  border-color: rgb(41 103 232 / 55%);
+  box-shadow:
+    0 0 0 3px rgb(41 103 232 / 12%),
+    0 10px 35px rgb(52 42 28 / 7%);
+}
+
 .text-workbench > label {
   display: block;
   padding: 1.2rem 1.3rem 0;
@@ -931,6 +992,10 @@ textarea::placeholder {
   font-weight: 600;
   letter-spacing: -0.03em;
   line-height: 1.35;
+}
+
+.text-workbench textarea:focus {
+  outline: 0;
 }
 
 .workbench-footer,
@@ -1168,6 +1233,11 @@ textarea::placeholder {
   color: var(--muted);
 }
 
+.reveal-close {
+  min-height: 2.3rem;
+  margin-top: 0.8rem;
+}
+
 .presenter-badge {
   display: flex;
   padding: 0.7rem 1rem;
@@ -1323,10 +1393,37 @@ textarea::placeholder {
   text-align: left;
 }
 
+.round-roster-manager {
+  max-width: 42rem;
+  margin: 1.2rem auto;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: var(--paper);
+  text-align: left;
+}
+
+.round-roster-manager h3 {
+  margin: 0.2rem 0 0;
+}
+
 .round-complete__actions {
   display: flex;
   justify-content: center;
   gap: 0.7rem;
+}
+
+.room-ended-card__icon {
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  margin: 0 auto 1rem;
+  border-radius: 50%;
+  place-items: center;
+  background: rgb(241 91 67 / 12%);
+  color: var(--coral-dark);
+  font-size: 1.5rem;
+  font-weight: 700;
 }
 
 @media (max-width: 900px) {
@@ -1430,6 +1527,18 @@ textarea::placeholder {
 
   .stage-progress {
     grid-template-columns: 1fr;
+  }
+
+  .admin-stage-actions {
+    right: 0.5rem;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    justify-content: stretch;
+    flex-wrap: wrap;
+  }
+
+  .admin-stage-actions .button {
+    flex: 1;
   }
 
   .workbench-footer {

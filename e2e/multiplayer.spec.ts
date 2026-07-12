@@ -7,6 +7,12 @@ interface Trio {
   roomCode: string
 }
 
+async function demoPause(page: Page, milliseconds = 1_000): Promise<void> {
+  if (process.env.RECORD_DEMO === '1') {
+    await page.waitForTimeout(milliseconds)
+  }
+}
+
 async function createRoom(
   context: BrowserContext,
   promptSeconds = 30,
@@ -64,7 +70,7 @@ async function createTrio(
 
 async function forceAdvance(page: Page): Promise<void> {
   page.once('dialog', (dialog) => dialog.accept())
-  await page.getByRole('button', {name: 'Force next stage'}).click()
+  await page.getByRole('button', {name: 'Next stage'}).click()
 }
 
 async function drawStroke(
@@ -99,8 +105,15 @@ test('three players complete, reveal, and begin another round', async ({
       page.getByRole('heading', {name: 'Write a secret prompt'}),
     ).toBeVisible()
   }
+  const hostPrompt = host.getByLabel(/Start this playbook/)
+  await hostPrompt.click()
+  expect(
+    await hostPrompt.evaluate(
+      (textarea) => getComputedStyle(textarea).outlineStyle,
+    ),
+  ).toBe('none')
 
-  await host.getByLabel(/Start this playbook/).fill('A small moon bakery')
+  await hostPrompt.fill('A small moon bakery')
   await host.getByRole('button', {name: 'Submit prompt'}).click()
   await host
     .getByLabel(/Start this playbook/)
@@ -149,7 +162,6 @@ test('three players complete, reveal, and begin another round', async ({
   await bee.getByRole('button', {name: 'Submit drawing'}).click()
   await drawStroke(cee, [0.5, 0.15], [0.5, 0.85])
   await cee.getByRole('button', {name: 'Submit drawing'}).click()
-  await forceAdvance(host)
 
   for (const page of [host, bee, cee]) {
     await expect(
@@ -162,7 +174,6 @@ test('three players complete, reveal, and begin another round', async ({
   for (const page of [host, bee, cee]) {
     await page.getByRole('button', {name: 'Submit prompt'}).click()
   }
-  await forceAdvance(host)
 
   await expect(host.getByText('The grand reveal', {exact: false})).toBeVisible()
   const openingPrompts: string[] = []
@@ -228,7 +239,7 @@ test('the next connected round player takes over when admin disappears', async (
 
   await host.close()
   await expect(
-    successorPage.getByRole('button', {name: 'Force next stage'}),
+    successorPage.getByRole('button', {name: 'Next stage'}),
   ).toBeVisible({timeout: 12_000})
 
   await forceAdvance(successorPage)
@@ -344,4 +355,59 @@ test('deadlines capture drafts, preserve submissions, and keep drawing strokes',
     ),
   )
   expect(nonWhiteCanvases).toContain(true)
+})
+
+test('admin can kick between rounds, end early, and close the room', async ({
+  context,
+}, testInfo) => {
+  const {host, bee, cee, roomCode} = await createTrio(context)
+  await demoPause(host)
+
+  host.once('dialog', (dialog) => dialog.accept())
+  await host.getByRole('button', {name: 'Kick Guest C'}).click()
+  await expect(
+    cee.getByRole('heading', {
+      name: 'You’ve been removed from this room',
+    }),
+  ).toBeVisible()
+  await expect(
+    host.locator('.player-name').filter({hasText: 'Guest C'}),
+  ).toHaveCount(0)
+  await demoPause(host)
+
+  const replacement = await joinRoom(context, roomCode, 'Replacement')
+  await expect(
+    host.locator('.player-name').filter({hasText: 'Replacement'}),
+  ).toHaveCount(1)
+  await demoPause(host)
+  await host.getByRole('button', {name: /shuffle & start round/i}).click()
+  await demoPause(host)
+
+  await host
+    .getByLabel(/Start this playbook/)
+    .fill('A deliberately short round')
+  await demoPause(host, 1_500)
+  if (process.env.RECORD_DEMO === '1') {
+    await host.screenshot({
+      path: testInfo.outputPath('admin-controls.png'),
+      fullPage: true,
+    })
+  }
+  host.once('dialog', (dialog) => dialog.accept())
+  await host.getByRole('button', {name: 'End round'}).click()
+
+  for (const page of [host, bee, replacement]) {
+    await expect(page.getByText('The grand reveal', {exact: false})).toBeVisible()
+    await expect(page.locator('.paper-number')).toContainText('1of 1')
+  }
+  await demoPause(host, 1_500)
+
+  host.once('dialog', (dialog) => dialog.accept())
+  await host.getByRole('button', {name: 'Close room'}).click()
+  for (const page of [host, bee, replacement]) {
+    await expect(
+      page.getByRole('heading', {name: 'This room has been shut down'}),
+    ).toBeVisible()
+  }
+  await demoPause(host, 1_500)
 })
