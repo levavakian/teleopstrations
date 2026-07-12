@@ -16,6 +16,7 @@ import {
 import {createTransport, type GameTransport} from './network'
 import type {
   Content,
+  ControlIntentRequest,
   GameIntent,
   IntentEnvelope,
   RoomConnection,
@@ -27,7 +28,7 @@ import type {
 
 const PRESENCE_INTERVAL_MS = 1_000
 const HEARTBEAT_TIMEOUT_MS = 5_000
-const SNAPSHOT_INTERVAL_MS = 2_000
+const SNAPSHOT_INTERVAL_MS = 5_000
 const EMPTY_TRANSPORT: TransportSnapshot = {
   kind: 'webrtc',
   selfPeerId: '',
@@ -70,9 +71,10 @@ function initialRoom(config: RoomSessionConfig): RoomState | null {
 export interface GameRoomApi {
   state: RoomState | null
   connection: RoomConnection
+  clockOffsetMs: number
   sendDraft(content: Content): void
   submit(content: Content): void
-  sendControl(intent: Exclude<GameIntent, {type: 'draft' | 'submit'}>): void
+  sendControl(intent: ControlIntentRequest): void
   leave(): Promise<void>
 }
 
@@ -88,6 +90,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     },
     error: null,
   })
+  const [clockOffsetMs, setClockOffsetMs] = useState(0)
   const stateRef = useRef(state)
   const transportRef = useRef<GameTransport | null>(null)
   const sequenceRef = useRef(0)
@@ -95,6 +98,8 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
   const peerPlayerRef = useRef(new Map<string, string>())
   const adminLastSeenRef = useRef(Date.now())
   const lastSnapshotSentRef = useRef(0)
+  const clockOffsetRef = useRef(0)
+  const seenIntentIdsRef = useRef(new Set<string>())
 
   const persist = useCallback(
     (next: RoomState) => {
@@ -145,8 +150,19 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       }
 
       if (current.adminId === config.player.id) {
+        if (seenIntentIdsRef.current.has(envelope.id)) return
+        seenIntentIdsRef.current.add(envelope.id)
+        if (seenIntentIdsRef.current.size > 1_000) {
+          const oldest = seenIntentIdsRef.current.values().next().value
+          if (oldest) seenIntentIdsRef.current.delete(oldest)
+        }
         const next = applyIntent(current, envelope, Date.now())
-        if (next !== current) publishState(next)
+        if (next !== current) {
+          const isCandidate =
+            envelope.intent.type === 'draft' ||
+            envelope.intent.type === 'submit'
+          publishState(next, !isCandidate)
+        }
       } else {
         const next = applyBackupIntent(current, envelope)
         if (next !== current) publishState(next, false)
@@ -189,7 +205,15 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         )
         return
       }
-      publishState(joinPlayer(current, player))
+      const next = joinPlayer(current, player)
+      if (next === current) {
+        void safeSend(
+          {type: 'snapshot', state: current, sentAt: Date.now()},
+          peerId,
+        )
+      } else {
+        publishState(next)
+      }
     }
 
     const unsubscribeMessages = transport.subscribe((message, peerId) => {
@@ -205,9 +229,15 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         if (
           current &&
           message.adminId === current.adminId &&
+          message.senderId === current.adminId &&
+          message.sessionId === current.players[current.adminId]?.sessionId &&
           message.adminEpoch >= current.adminEpoch
         ) {
           adminLastSeenRef.current = Date.now()
+          const sample = message.sentAt - Date.now()
+          clockOffsetRef.current =
+            clockOffsetRef.current * 0.7 + sample * 0.3
+          setClockOffsetMs(clockOffsetRef.current)
         }
         return
       }
@@ -222,14 +252,50 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         message.state.protocolVersion === 1 &&
         message.state.roomCode === config.roomCode
       ) {
-        const next = mergeReplica(stateRef.current, message.state)
+        const previous = stateRef.current
+        const next = mergeReplica(previous, message.state)
         if (
           next.adminId === message.state.adminId &&
           next.adminEpoch === message.state.adminEpoch
         ) {
           adminLastSeenRef.current = Date.now()
+          const sample = message.sentAt - Date.now()
+          clockOffsetRef.current =
+            clockOffsetRef.current * 0.7 + sample * 0.3
+          setClockOffsetMs(clockOffsetRef.current)
         }
         publishState(next, false)
+        if (
+          previous &&
+          next.adminEpoch > previous.adminEpoch &&
+          next.adminId !== config.player.id &&
+          next.phase === 'stage' &&
+          next.round
+        ) {
+          const assignment = next.round.assignments[config.player.id]
+          for (const [type, candidate] of [
+            ['draft', assignment?.draft],
+            ['submit', assignment?.submission],
+          ] as const) {
+            if (!candidate || candidate.sessionId !== config.player.sessionId) {
+              continue
+            }
+            void safeSend({
+              type: 'intent',
+              envelope: {
+                id: createId(),
+                senderId: config.player.id,
+                sessionId: config.player.sessionId,
+                intent: {
+                  type,
+                  roundId: next.round.id,
+                  stageIndex: next.round.stageIndex,
+                  candidate,
+                },
+              },
+            })
+          }
+        }
       }
     })
 
@@ -260,9 +326,15 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
       if (isAdmin) {
         adminLastSeenRef.current = now
+        if (clockOffsetRef.current !== 0) {
+          clockOffsetRef.current = 0
+          setClockOffsetMs(0)
+        }
         void safeSend({
           type: 'heartbeat',
           adminId: current.adminId,
+          senderId: config.player.id,
+          sessionId: config.player.sessionId,
           adminEpoch: current.adminEpoch,
           revision: current.revision,
           sentAt: now,
@@ -309,7 +381,14 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       const candidate = nextAdminCandidate(current, connected)
       if (candidate !== config.player.id) return
 
-      const elected = electAdmin(current, candidate)
+      const elected = electAdmin(
+        current,
+        candidate,
+        now,
+        clockOffsetRef.current,
+      )
+      clockOffsetRef.current = 0
+      setClockOffsetMs(0)
       adminLastSeenRef.current = now
       publishState(elected)
     }, 250)
@@ -362,7 +441,48 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
   )
 
   const sendControl = useCallback(
-    (intent: Exclude<GameIntent, {type: 'draft' | 'submit'}>) => {
+    (request: ControlIntentRequest) => {
+      const current = stateRef.current
+      if (!current) return
+      let intent: GameIntent
+
+      if (request.type === 'settings') {
+        intent = request
+      } else if (request.type === 'start-round') {
+        if (current.phase === 'stage') return
+        intent = {
+          type: 'start-round',
+          expectedPhase: current.phase,
+          previousRoundId: current.round?.id ?? null,
+        }
+      } else if (request.type === 'force-advance') {
+        if (current.phase !== 'stage' || !current.round) return
+        intent = {
+          type: 'force-advance',
+          roundId: current.round.id,
+          stageIndex: current.round.stageIndex,
+        }
+      } else if (
+        request.type === 'reveal-page' ||
+        request.type === 'reveal-book'
+      ) {
+        if (
+          current.phase !== 'reveal' ||
+          !current.round ||
+          !current.round.reveal
+        ) {
+          return
+        }
+        intent = {
+          ...request,
+          roundId: current.round.id,
+          bookIndex: current.round.reveal.bookIndex,
+        }
+      } else {
+        if (!current.round) return
+        intent = {type: 'reset-lobby', roundId: current.round.id}
+      }
+
       processIntent(
         {
           id: createId(),
@@ -394,6 +514,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
   return {
     state,
     connection: effectiveConnection,
+    clockOffsetMs,
     sendDraft: (content) => sendCandidate('draft', content),
     submit: (content) => sendCandidate('submit', content),
     sendControl,

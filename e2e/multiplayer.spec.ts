@@ -46,8 +46,16 @@ async function joinRoom(
   return page
 }
 
-async function createTrio(context: BrowserContext): Promise<Trio> {
-  const {host, roomCode} = await createRoom(context)
+async function createTrio(
+  context: BrowserContext,
+  promptSeconds = 30,
+  drawingSeconds = 30,
+): Promise<Trio> {
+  const {host, roomCode} = await createRoom(
+    context,
+    promptSeconds,
+    drawingSeconds,
+  )
   const bee = await joinRoom(context, roomCode, 'Guest B')
   const cee = await joinRoom(context, roomCode, 'Guest C')
   await expect(host.locator('.connection-pill')).toContainText('3 online')
@@ -255,4 +263,85 @@ test('a frozen player reclaims their assignment by name', async ({context}) => {
   await expect(
     bee.locator('.stage-roster .player-name').filter({hasText: 'Guest C'}),
   ).toHaveCount(1)
+})
+
+test('an older same-name tab cannot steal a reclaimed session back', async ({
+  context,
+}) => {
+  const {host, cee, roomCode} = await createTrio(context)
+  const replacement = await joinRoom(context, roomCode, 'Guest C')
+
+  await expect(
+    cee.getByRole('heading', {name: 'Welcome back, Guest C'}),
+  ).toBeVisible()
+  await replacement.waitForTimeout(3_000)
+  await expect(
+    replacement.getByRole('heading', {name: 'Gather the storytellers'}),
+  ).toBeVisible()
+  await expect(
+    host.locator('.player-name').filter({hasText: 'Guest C'}),
+  ).toHaveCount(1)
+})
+
+test('deadlines capture drafts, preserve submissions, and keep drawing strokes', async ({
+  context,
+}) => {
+  const {host, bee, cee} = await createTrio(context, 3, 3)
+  await host.getByRole('button', {name: /shuffle & start round/i}).click()
+
+  await host
+    .getByLabel(/Start this playbook/)
+    .fill('Captured host draft at the deadline')
+  await bee
+    .getByLabel(/Start this playbook/)
+    .fill('Bee explicit submission')
+  await bee.getByRole('button', {name: 'Submit prompt'}).click()
+  await bee
+    .getByLabel(/Start this playbook/)
+    .fill('Bee unsubmitted edit must not win')
+
+  for (const page of [host, bee, cee]) {
+    await expect(
+      page.getByRole('heading', {name: 'Draw what you read'}),
+    ).toBeVisible({timeout: 8_000})
+  }
+
+  const receivedPrompts = await Promise.all(
+    [host, bee, cee].map((page) =>
+      page.locator('.source-card blockquote').innerText(),
+    ),
+  )
+  expect(receivedPrompts).toContain('Captured host draft at the deadline')
+  expect(receivedPrompts).toContain('Bee explicit submission')
+  expect(receivedPrompts).not.toContain('Bee unsubmitted edit must not win')
+  expect(receivedPrompts).toContain(
+    'Guest C did not submit a prompt in time, draw what you think of them',
+  )
+
+  await drawStroke(host, [0.1, 0.1], [0.9, 0.9])
+  for (const page of [host, bee, cee]) {
+    await expect(
+      page.getByRole('heading', {name: 'Describe what you see'}),
+    ).toBeVisible({timeout: 8_000})
+  }
+
+  const nonWhiteCanvases = await Promise.all(
+    [host, bee, cee].map((page) =>
+      page.getByLabel('Drawing to describe').evaluate((canvas) => {
+        const context = (canvas as HTMLCanvasElement).getContext('2d')!
+        const pixels = context.getImageData(0, 0, 1000, 700).data
+        for (let index = 0; index < pixels.length; index += 4) {
+          if (
+            pixels[index] < 245 ||
+            pixels[index + 1] < 245 ||
+            pixels[index + 2] < 245
+          ) {
+            return true
+          }
+        }
+        return false
+      }),
+    ),
+  )
+  expect(nonWhiteCanvases).toContain(true)
 })

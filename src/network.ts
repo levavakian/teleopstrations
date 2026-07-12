@@ -71,6 +71,7 @@ class BroadcastTransport extends BaseTransport {
   private readonly channel: BroadcastChannel
   private readonly peers = new Map<string, number>()
   private readonly cleanupTimer: number
+  private closed = false
 
   constructor(roomCode: string) {
     super()
@@ -122,6 +123,8 @@ class BroadcastTransport extends BaseTransport {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
     window.clearInterval(this.cleanupTimer)
     this.channel.close()
     this.messageListeners.clear()
@@ -134,6 +137,7 @@ class TrysteroTransport extends BaseTransport {
   readonly selfPeerId = selfId
   private readonly room: Room
   private readonly action: MessageAction<JsonValue>
+  private closed = false
 
   constructor(roomCode: string, onError: (message: string) => void) {
     super()
@@ -174,6 +178,8 @@ class TrysteroTransport extends BaseTransport {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
     this.action.onMessage = null
     this.room.onPeerJoin = null
     this.room.onPeerLeave = null

@@ -55,6 +55,7 @@ function makePlayer(name: string): PlayerSession {
     id: playerIdForName(normalized),
     name: normalized,
     sessionId: createId(),
+    sessionStartedAt: Date.now(),
   }
 }
 
@@ -333,9 +334,25 @@ function RoomHeader({
   const copyInvite = async () => {
     const url = new URL(location.href)
     url.hash = new URLSearchParams({room: state.roomCode}).toString()
-    await navigator.clipboard.writeText(url.href)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1_500)
+    let didCopy: boolean
+    try {
+      await navigator.clipboard.writeText(url.href)
+      didCopy = true
+    } catch {
+      const fallback = document.createElement('textarea')
+      fallback.value = url.href
+      fallback.style.position = 'fixed'
+      fallback.style.opacity = '0'
+      document.body.append(fallback)
+      fallback.focus()
+      fallback.select()
+      didCopy = document.execCommand('copy')
+      fallback.remove()
+    }
+    if (didCopy) {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1_500)
+    }
   }
 
   return (
@@ -500,6 +517,12 @@ function Lobby({
           and frozen until every playbook is complete.
         </p>
 
+        <div className="lobby-invite" aria-label="Room invite code">
+          <span>Invite code</span>
+          <strong>{displayRoomCode(state.roomCode)}</strong>
+          <small>Share this code, or copy the invite link from the header.</small>
+        </div>
+
         <div className="lobby-count">
           <strong>{connected}</strong>
           <span>
@@ -563,16 +586,17 @@ function Lobby({
   )
 }
 
-function useCountdown(deadline: number): number {
+function useCountdown(deadline: number, clockOffsetMs: number): number {
   const [remaining, setRemaining] = useState(() =>
-    Math.max(0, deadline - Date.now()),
+    Math.max(0, deadline - (Date.now() + clockOffsetMs)),
   )
   useEffect(() => {
-    const update = () => setRemaining(Math.max(0, deadline - Date.now()))
+    const update = () =>
+      setRemaining(Math.max(0, deadline - (Date.now() + clockOffsetMs)))
     update()
     const timer = window.setInterval(update, 200)
     return () => window.clearInterval(timer)
-  }, [deadline])
+  }, [clockOffsetMs, deadline])
   return remaining
 }
 
@@ -755,15 +779,17 @@ function Stage({
   sendDraft,
   submit,
   sendControl,
+  clockOffsetMs,
 }: {
   state: RoomState
   config: RoomSessionConfig
   sendDraft: ReturnType<typeof useGameRoom>['sendDraft']
   submit: ReturnType<typeof useGameRoom>['submit']
   sendControl: ReturnType<typeof useGameRoom>['sendControl']
+  clockOffsetMs: number
 }) {
   const round = state.round!
-  const remaining = useCountdown(round.deadline)
+  const remaining = useCountdown(round.deadline, clockOffsetMs)
   const assignment = getAssignment(state, config.player.id)
   const source = getAssignmentSource(state, config.player.id)
   const submittedCount = getSubmissionCount(state)
@@ -1023,7 +1049,15 @@ function Reveal({
                 <button
                   className="button button--quiet"
                   type="button"
-                  onClick={() => sendControl({type: 'reset-lobby'})}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        'Return to the lobby and close this completed round?',
+                      )
+                    ) {
+                      sendControl({type: 'reset-lobby'})
+                    }
+                  }}
                 >
                   Return to lobby
                 </button>
@@ -1121,6 +1155,7 @@ function Room({
           sendDraft={room.sendDraft}
           submit={room.submit}
           sendControl={room.sendControl}
+          clockOffsetMs={room.clockOffsetMs}
         />
       ) : (
         <Reveal
