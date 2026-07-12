@@ -96,7 +96,10 @@ contribution to every stage.
 The coordinator is authoritative for membership, deadlines, stage transitions,
 and accepted submissions. Peers render from versioned snapshots and keep their
 own current draft locally so a temporary connection interruption does not erase
-work.
+work. Canonical changes are pushed immediately; non-admin peers also request the
+current snapshot every 15 seconds and whenever an admin heartbeat advertises a
+newer cursor. Peers acknowledge their phase/stage/reveal cursor so the admin can
+see who is on the same page.
 
 ## Stage and deadline rules
 
@@ -162,6 +165,10 @@ the initial scope.
   Trystero supplies discovery through third-party relays; those services are an
   external availability dependency even though this repository deploys only a
   static site.
+- Messages use bounded, deduplicated peer gossip so a client can reach the admin
+  through another connected player when one direct WebRTC edge fails. A device
+  that cannot connect to any peer still requires an external TURN service;
+  permanent TURN credentials cannot be safely embedded in a static bundle.
 - A peer-hosted game cannot provide server-grade trust. A determined player can
   inspect local JavaScript/state, forge client messages, or attempt to claim a
   name. The protocol will validate normal malformed/stale actions but is aimed

@@ -458,6 +458,77 @@ textarea::placeholder {
   text-align: center;
 }
 
+.sync-status {
+  width: min(1180px, calc(100% - 2rem));
+  margin: 0.7rem auto 0;
+  color: var(--muted);
+  font-family: 'DM Mono', monospace;
+  font-size: 0.66rem;
+}
+
+.sync-status summary {
+  width: fit-content;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  background: rgb(255 253 248 / 88%);
+}
+
+.sync-status ul {
+  display: grid;
+  margin: 0.45rem 0 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: var(--paper);
+  gap: 0.35rem;
+}
+
+.sync-status li {
+  display: grid;
+  align-items: center;
+  grid-template-columns: auto minmax(9rem, 1fr) auto;
+  gap: 1rem;
+}
+
+.sync-status strong {
+  color: var(--ink);
+}
+
+.sync-status__mark {
+  display: grid;
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 50%;
+  place-items: center;
+  background: #ece6db;
+  color: var(--muted);
+  font-family: 'Manrope', sans-serif;
+  font-weight: 800;
+}
+
+.sync-status li.is-synced .sync-status__mark {
+  background: rgb(46 157 102 / 13%);
+  color: var(--green);
+}
+
+.sync-status__player {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.sync-status__player small,
+.sync-status__state {
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.sync-status li.is-synced .sync-status__state {
+  color: var(--green);
+  font-weight: 700;
+}
+
 .room-main {
   display: grid;
   width: min(1180px, calc(100% - 2rem));
@@ -1506,6 +1577,15 @@ textarea::placeholder {
   .stage-page,
   .reveal-page {
     width: min(100% - 1rem, 1180px);
+  }
+
+  .sync-status li {
+    grid-template-columns: auto 1fr;
+    gap: 0.45rem 0.7rem;
+  }
+
+  .sync-status__state {
+    grid-column: 2;
   }
 
   .lobby-card {

@@ -103,6 +103,24 @@ export interface RoomState {
   round: RoundState | null
 }
 
+export interface SyncCursor {
+  adminId: PlayerId
+  adminEpoch: number
+  revision: number
+  phase: GamePhase
+  roundId: string | null
+  roundNumber: number | null
+  stageIndex: number | null
+  revealBookIndex: number | null
+  revealPageIndex: number | null
+}
+
+export interface PeerSyncReport {
+  playerId: PlayerId
+  cursor: SyncCursor
+  receivedAt: number
+}
+
 export interface PlayerSession {
   id: PlayerId
   name: string
@@ -170,35 +188,61 @@ export interface IntentEnvelope {
   intent: GameIntent
 }
 
+interface GossipMessage {
+  messageId: string
+  hopsRemaining: number
+}
+
 export type WireMessage =
-  | {
+  | (GossipMessage & {
       type: 'join'
       player: PlayerSession
       sentAt: number
-    }
-  | {
+    })
+  | (GossipMessage & {
       type: 'presence'
       player: PlayerSession
       sentAt: number
-    }
-  | {
+    })
+  | (GossipMessage & {
       type: 'heartbeat'
       adminId: PlayerId
       senderId: PlayerId
       sessionId: string
       adminEpoch: number
       revision: number
+      cursor: SyncCursor
       sentAt: number
-    }
-  | {
+    })
+  | (GossipMessage & {
       type: 'intent'
       envelope: IntentEnvelope
-    }
-  | {
+    })
+  | (GossipMessage & {
       type: 'snapshot'
+      senderId: PlayerId
+      sessionId: string
       state: RoomState
+      reason: 'push' | 'periodic' | 'join' | 'sync-response' | 'failover'
       sentAt: number
-    }
+    })
+  | (GossipMessage & {
+      type: 'sync-request'
+      roomCode: string
+      senderId: PlayerId
+      sessionId: string
+      cursor: SyncCursor | null
+      reason: 'join' | 'poll' | 'cursor-ahead'
+      sentAt: number
+    })
+  | (GossipMessage & {
+      type: 'sync-report'
+      roomCode: string
+      senderId: PlayerId
+      sessionId: string
+      cursor: SyncCursor
+      sentAt: number
+    })
 
 export interface TransportPeer {
   id: string

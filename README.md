@@ -37,6 +37,11 @@ room state; if the admin disappears, the next connected player in the frozen
 order takes over. Admins can end a round early, kick players between rounds, or
 close the room for all connected peers.
 
+Snapshots are authoritative only when attributed to the current admin session.
+Updates and 15-second sync requests use bounded gossip so a partially connected
+peer graph can converge without an application server. The admin can expand the
+sync report to compare each player’s phase, stage, and reveal cursor.
+
 ## Commands
 
 | Command | Purpose |
@@ -61,5 +66,12 @@ There is intentionally no configured maximum player count, but browser
 full-mesh WebRTC and full-state replication impose practical device/network
 limits. This is a trusted party game: name-only rejoining and replicated hidden
 content are not designed to resist malicious players.
+The admin is the canonical state writer. Other clients receive pushed snapshots,
+poll every 15 seconds, and relay bounded gossip through connected peers when a
+direct admin edge is unavailable.
+The static deployment has no TURN relay, so a device that cannot connect to any
+peer can still be isolated on a restrictive network. TURN requires an external
+service with short-lived credentials; permanent credentials must not be shipped
+in the Pages bundle.
 Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
 clears its round, while permanent deletion cannot exist without a server.

@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 
 import {
+  adoptAuthoritativeSnapshot,
   advanceStage,
   applyBackupIntent,
   applyIntent,
@@ -10,27 +11,40 @@ import {
   getSubmissionCount,
   hydrateRoomState,
   intentForCandidate,
+  isAdminAuthoritativeSnapshot,
+  isSyncCursorAhead,
   joinPlayer,
-  mergeReplica,
   nextAdminCandidate,
   setPlayerConnected,
+  syncCursorForState,
 } from './game'
-import {createTransport, type GameTransport} from './network'
+import {
+  TURN_ISOLATION_MESSAGE,
+  createTransport,
+  type GameTransport,
+} from './network'
 import type {
   Content,
   ControlIntentRequest,
   GameIntent,
   IntentEnvelope,
+  PeerSyncReport,
   RoomConnection,
   RoomSessionConfig,
   RoomState,
+  SyncCursor,
   TransportSnapshot,
   WireMessage,
 } from './types'
 
 const PRESENCE_INTERVAL_MS = 1_000
+const HEARTBEAT_INTERVAL_MS = 1_000
 const HEARTBEAT_TIMEOUT_MS = 5_000
 const SNAPSHOT_INTERVAL_MS = 5_000
+const SYNC_INTERVAL_MS = 15_000
+const ISOLATED_PEER_WARNING_MS = 15_000
+const GOSSIP_HOP_LIMIT = 8
+const MAX_SEEN_MESSAGE_IDS = 2_000
 const EMPTY_TRANSPORT: TransportSnapshot = {
   kind: 'webrtc',
   selfPeerId: '',
@@ -74,6 +88,7 @@ export interface GameRoomApi {
   state: RoomState | null
   connection: RoomConnection
   clockOffsetMs: number
+  syncReports: Record<string, PeerSyncReport>
   sendDraft(content: Content): void
   submit(content: Content): void
   sendControl(intent: ControlIntentRequest): void
@@ -93,6 +108,9 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     error: null,
   })
   const [clockOffsetMs, setClockOffsetMs] = useState(0)
+  const [syncReports, setSyncReports] = useState<
+    Record<string, PeerSyncReport>
+  >({})
   const stateRef = useRef(state)
   const transportRef = useRef<GameTransport | null>(null)
   const sequenceRef = useRef(0)
@@ -100,8 +118,15 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
   const peerPlayerRef = useRef(new Map<string, string>())
   const adminLastSeenRef = useRef(Date.now())
   const lastSnapshotSentRef = useRef(0)
+  const lastHeartbeatSentRef = useRef(0)
+  const lastSyncRequestRef = useRef(0)
+  const connectionStartedRef = useRef(Date.now())
   const clockOffsetRef = useRef(0)
   const seenIntentIdsRef = useRef(new Set<string>())
+  const seenMessageIdsRef = useRef(new Set<string>())
+  const latestAuthoritativeSnapshotRef = useRef<
+    Extract<WireMessage, {type: 'snapshot'}> | null
+  >(null)
 
   const persist = useCallback(
     (next: RoomState) => {
@@ -129,17 +154,120 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     [],
   )
 
+  const rememberMessage = useCallback((messageId: string) => {
+    const seen = seenMessageIdsRef.current
+    seen.add(messageId)
+    if (seen.size > MAX_SEEN_MESSAGE_IDS) {
+      const oldest = seen.values().next().value
+      if (oldest) seen.delete(oldest)
+    }
+  }, [])
+
+  const originate = useCallback(
+    (message: WireMessage) => {
+      rememberMessage(message.messageId)
+      void safeSend(message)
+    },
+    [rememberMessage, safeSend],
+  )
+
+  const sendSnapshot = useCallback(
+    (
+      next: RoomState,
+      reason: Extract<WireMessage, {type: 'snapshot'}>['reason'],
+    ) => {
+      if (next.adminId !== config.player.id) return
+      const message: Extract<WireMessage, {type: 'snapshot'}> = {
+        type: 'snapshot',
+        messageId: createId(),
+        hopsRemaining: GOSSIP_HOP_LIMIT,
+        senderId: config.player.id,
+        sessionId: config.player.sessionId,
+        state: next,
+        reason,
+        sentAt: Date.now(),
+      }
+      latestAuthoritativeSnapshotRef.current = message
+      lastSnapshotSentRef.current = message.sentAt
+      originate(message)
+    },
+    [config.player.id, config.player.sessionId, originate],
+  )
+
+  const recordSyncReport = useCallback(
+    (playerId: string, cursor: SyncCursor, receivedAt: number) => {
+      setSyncReports((current) => ({
+        ...current,
+        [playerId]: {playerId, cursor, receivedAt},
+      }))
+    },
+    [],
+  )
+
+  const sendSyncReport = useCallback(
+    (current: RoomState) => {
+      if (current.adminId === config.player.id) return
+      originate({
+        type: 'sync-report',
+        messageId: createId(),
+        hopsRemaining: GOSSIP_HOP_LIMIT,
+        roomCode: config.roomCode,
+        senderId: config.player.id,
+        sessionId: config.player.sessionId,
+        cursor: syncCursorForState(current),
+        sentAt: Date.now(),
+      })
+    },
+    [
+      config.player.id,
+      config.player.sessionId,
+      config.roomCode,
+      originate,
+    ],
+  )
+
+  const sendSyncRequest = useCallback(
+    (reason: Extract<WireMessage, {type: 'sync-request'}>['reason']) => {
+      const current = stateRef.current
+      if (current?.adminId === config.player.id) return
+      const now = Date.now()
+      if (
+        reason === 'cursor-ahead' &&
+        now - lastSyncRequestRef.current < PRESENCE_INTERVAL_MS
+      ) {
+        return
+      }
+      lastSyncRequestRef.current = now
+      originate({
+        type: 'sync-request',
+        messageId: createId(),
+        hopsRemaining: GOSSIP_HOP_LIMIT,
+        roomCode: config.roomCode,
+        senderId: config.player.id,
+        sessionId: config.player.sessionId,
+        cursor: current ? syncCursorForState(current) : null,
+        reason,
+        sentAt: now,
+      })
+    },
+    [
+      config.player.id,
+      config.player.sessionId,
+      config.roomCode,
+      originate,
+    ],
+  )
+
   const publishState = useCallback(
     (next: RoomState, announce = true) => {
       stateRef.current = next
       setState(next)
       persist(next)
       if (announce) {
-        lastSnapshotSentRef.current = Date.now()
-        void safeSend({type: 'snapshot', state: next, sentAt: Date.now()})
+        sendSnapshot(next, 'push')
       }
     },
-    [persist, safeSend],
+    [persist, sendSnapshot],
   )
 
   const processIntent = useCallback(
@@ -148,7 +276,12 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       if (!current) return
 
       if (announceIntent) {
-        void safeSend({type: 'intent', envelope})
+        originate({
+          type: 'intent',
+          messageId: envelope.id,
+          hopsRemaining: GOSSIP_HOP_LIMIT,
+          envelope,
+        })
       }
 
       if (current.adminId === config.player.id) {
@@ -182,11 +315,12 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         if (next !== current) publishState(next, false)
       }
     },
-    [config.player.id, publishState, safeSend],
+    [config.player.id, originate, publishState],
   )
 
   useEffect(() => {
     let disposed = false
+    connectionStartedRef.current = Date.now()
     const transport = createTransport(
       config.transportKind ?? 'webrtc',
       config.roomCode,
@@ -196,12 +330,30 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     transportRef.current = transport
 
     const unsubscribePeers = transport.subscribePeers((snapshot) => {
-      setConnection((current) => ({...current, transport: snapshot}))
+      setConnection((current) => ({
+        ...current,
+        transport: snapshot,
+        error:
+          snapshot.peers.length > 0 &&
+          (current.error === TURN_ISOLATION_MESSAGE ||
+            current.error?.startsWith('A direct WebRTC link failed'))
+            ? null
+            : current.error,
+      }))
     })
+
+    const relay = (message: WireMessage) => {
+      if (message.hopsRemaining <= 0) return
+      void safeSend({
+        ...message,
+        hopsRemaining: message.hopsRemaining - 1,
+      } as WireMessage)
+    }
 
     const handleJoin = (
       player: RoomSessionConfig['player'],
       peerId: string,
+      requestSnapshot: boolean,
     ) => {
       peerPlayerRef.current.set(peerId, player.id)
       playerLastSeenRef.current.set(player.id, Date.now())
@@ -213,18 +365,12 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         known.connected &&
         known.name === player.name
       ) {
-        void safeSend(
-          {type: 'snapshot', state: current, sentAt: Date.now()},
-          peerId,
-        )
+        if (requestSnapshot) sendSnapshot(current, 'join')
         return
       }
       const next = joinPlayer(current, player)
       if (next === current) {
-        void safeSend(
-          {type: 'snapshot', state: current, sentAt: Date.now()},
-          peerId,
-        )
+        if (requestSnapshot) sendSnapshot(current, 'join')
       } else {
         publishState(next)
       }
@@ -232,14 +378,25 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
     const unsubscribeMessages = transport.subscribe((message, peerId) => {
       if (disposed || !message || typeof message !== 'object') return
+      if (
+        typeof message.messageId !== 'string' ||
+        typeof message.hopsRemaining !== 'number' ||
+        seenMessageIdsRef.current.has(message.messageId)
+      ) {
+        return
+      }
+      rememberMessage(message.messageId)
 
       if (message.type === 'join' || message.type === 'presence') {
-        handleJoin(message.player, peerId)
+        relay(message)
+        handleJoin(message.player, peerId, message.type === 'join')
         return
       }
 
       if (message.type === 'heartbeat') {
         const current = stateRef.current
+        if (message.senderId !== message.adminId) return
+        relay(message)
         if (
           current &&
           message.adminId === current.adminId &&
@@ -252,23 +409,100 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
           clockOffsetRef.current =
             clockOffsetRef.current * 0.7 + sample * 0.3
           setClockOffsetMs(clockOffsetRef.current)
+          if (
+            isSyncCursorAhead(
+              message.cursor,
+              syncCursorForState(current),
+            )
+          ) {
+            sendSyncRequest('cursor-ahead')
+          }
         }
         return
       }
 
       if (message.type === 'intent') {
+        relay(message)
         processIntent(message.envelope, false)
         return
       }
 
-      if (
-        message.type === 'snapshot' &&
-        message.state.protocolVersion === 1 &&
-        message.state.roomCode === config.roomCode
-      ) {
+      if (message.type === 'sync-request') {
+        if (message.roomCode !== config.roomCode) return
+        relay(message)
+        const current = stateRef.current
+        const player = current?.players[message.senderId]
+        if (
+          current?.adminId === config.player.id &&
+          message.cursor &&
+          player?.sessionId === message.sessionId
+        ) {
+          recordSyncReport(message.senderId, message.cursor, Date.now())
+        }
+        if (current?.adminId === config.player.id) {
+          sendSnapshot(current, 'sync-response')
+          return
+        }
+        const cached = latestAuthoritativeSnapshotRef.current
+        if (
+          cached &&
+          (!message.cursor ||
+            isSyncCursorAhead(
+              syncCursorForState(cached.state),
+              message.cursor,
+            ))
+        ) {
+          void safeSend({
+            ...cached,
+            messageId: createId(),
+            hopsRemaining: GOSSIP_HOP_LIMIT,
+            reason: 'sync-response',
+            sentAt: Date.now(),
+          })
+        }
+        return
+      }
+
+      if (message.type === 'sync-report') {
+        if (message.roomCode !== config.roomCode) return
+        relay(message)
+        const current = stateRef.current
+        if (
+          current?.adminId === config.player.id &&
+          current.players[message.senderId]?.sessionId === message.sessionId
+        ) {
+          recordSyncReport(message.senderId, message.cursor, Date.now())
+        }
+        return
+      }
+
+      if (message.type === 'snapshot') {
+        if (
+          message.state.protocolVersion !== 1 ||
+          message.state.roomCode !== config.roomCode ||
+          !isAdminAuthoritativeSnapshot(
+            message.state,
+            message.senderId,
+            message.sessionId,
+          )
+        ) {
+          return
+        }
+        relay(message)
         const previous = stateRef.current
         const incoming = hydrateRoomState(message.state)
-        const next = mergeReplica(previous, incoming)
+        const cached = latestAuthoritativeSnapshotRef.current
+        const cachedWinner = cached
+          ? adoptAuthoritativeSnapshot(cached.state, incoming)
+          : incoming
+        if (
+          cachedWinner.adminId === incoming.adminId &&
+          cachedWinner.adminEpoch === incoming.adminEpoch &&
+          cachedWinner.revision === incoming.revision
+        ) {
+          latestAuthoritativeSnapshotRef.current = message
+        }
+        const next = adoptAuthoritativeSnapshot(previous, incoming)
         if (
           next.adminId === incoming.adminId &&
           next.adminEpoch === incoming.adminEpoch
@@ -280,6 +514,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
           setClockOffsetMs(clockOffsetRef.current)
         }
         publishState(next, false)
+        sendSyncReport(next)
         if (
           previous &&
           next.adminEpoch > previous.adminEpoch &&
@@ -295,19 +530,22 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
             if (!candidate || candidate.sessionId !== config.player.sessionId) {
               continue
             }
-            void safeSend({
-              type: 'intent',
-              envelope: {
-                id: createId(),
-                senderId: config.player.id,
-                sessionId: config.player.sessionId,
-                intent: {
-                  type,
-                  roundId: next.round.id,
-                  stageIndex: next.round.stageIndex,
-                  candidate,
-                },
+            const envelope: IntentEnvelope = {
+              id: createId(),
+              senderId: config.player.id,
+              sessionId: config.player.sessionId,
+              intent: {
+                type,
+                roundId: next.round.id,
+                stageIndex: next.round.stageIndex,
+                candidate,
               },
+            }
+            originate({
+              type: 'intent',
+              messageId: envelope.id,
+              hopsRemaining: GOSSIP_HOP_LIMIT,
+              envelope,
             })
           }
         }
@@ -319,8 +557,10 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       const recognized =
         current?.players[config.player.id]?.sessionId ===
         config.player.sessionId
-      void safeSend({
+      originate({
         type: recognized ? 'presence' : 'join',
+        messageId: createId(),
+        hopsRemaining: GOSSIP_HOP_LIMIT,
         player: config.player,
         sentAt: Date.now(),
       })
@@ -329,14 +569,38 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
     sendPresence()
     if (stateRef.current?.adminId === config.player.id) {
-      publishState(stateRef.current)
+      sendSnapshot(stateRef.current, 'push')
+    } else {
+      sendSyncRequest('join')
     }
 
     const presenceTimer = window.setInterval(sendPresence, PRESENCE_INTERVAL_MS)
+    const syncTimer = window.setInterval(() => {
+      sendSyncRequest('poll')
+      const current = stateRef.current
+      if (current) sendSyncReport(current)
+    }, SYNC_INTERVAL_MS)
     const coordinatorTimer = window.setInterval(() => {
+      const now = Date.now()
+      if (
+        config.mode === 'join' &&
+        (config.transportKind ?? 'webrtc') === 'webrtc' &&
+        transport.snapshot().peers.length === 0 &&
+        now - connectionStartedRef.current >= ISOLATED_PEER_WARNING_MS
+      ) {
+        setConnection((current) =>
+          current.error
+            ? current
+            : {
+                ...current,
+                error: TURN_ISOLATION_MESSAGE,
+                status: 'reconnecting',
+              },
+        )
+      }
+
       const current = stateRef.current
       if (!current) return
-      const now = Date.now()
       const isAdmin = current.adminId === config.player.id
 
       if (isAdmin) {
@@ -345,15 +609,23 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
           clockOffsetRef.current = 0
           setClockOffsetMs(0)
         }
-        void safeSend({
-          type: 'heartbeat',
-          adminId: current.adminId,
-          senderId: config.player.id,
-          sessionId: config.player.sessionId,
-          adminEpoch: current.adminEpoch,
-          revision: current.revision,
-          sentAt: now,
-        })
+        if (
+          now - lastHeartbeatSentRef.current >= HEARTBEAT_INTERVAL_MS
+        ) {
+          lastHeartbeatSentRef.current = now
+          originate({
+            type: 'heartbeat',
+            messageId: createId(),
+            hopsRemaining: GOSSIP_HOP_LIMIT,
+            adminId: current.adminId,
+            senderId: config.player.id,
+            sessionId: config.player.sessionId,
+            adminEpoch: current.adminEpoch,
+            revision: current.revision,
+            cursor: syncCursorForState(current),
+            sentAt: now,
+          })
+        }
 
         let presenceState = current
         for (const playerId of current.joinOrder) {
@@ -384,7 +656,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         }
 
         if (now - lastSnapshotSentRef.current >= SNAPSHOT_INTERVAL_MS) {
-          publishState(presenceState)
+          sendSnapshot(presenceState, 'periodic')
         }
         return
       }
@@ -413,6 +685,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     return () => {
       disposed = true
       window.clearInterval(presenceTimer)
+      window.clearInterval(syncTimer)
       window.clearInterval(coordinatorTimer)
       unsubscribeMessages()
       unsubscribePeers()
@@ -421,9 +694,15 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     }
   }, [
     config,
+    originate,
     processIntent,
     publishState,
+    recordSyncReport,
+    rememberMessage,
     safeSend,
+    sendSnapshot,
+    sendSyncReport,
+    sendSyncRequest,
   ])
 
   useEffect(() => {
@@ -558,6 +837,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     state,
     connection: effectiveConnection,
     clockOffsetMs,
+    syncReports,
     sendDraft: (content) => sendCandidate('draft', content),
     submit: (content) => sendCandidate('submit', content),
     sendControl,

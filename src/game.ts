@@ -12,6 +12,7 @@ import type {
   RoomState,
   RoundState,
   StageKind,
+  SyncCursor,
 } from './types'
 
 export const DEFAULT_SETTINGS: GameSettings = {
@@ -71,6 +72,70 @@ export function hydrateRoomState(state: RoomState): RoomState {
     blockedPlayerIds: state.blockedPlayerIds ?? [],
     closedAt: state.closedAt ?? null,
   }
+}
+
+export function syncCursorForState(state: RoomState): SyncCursor {
+  return {
+    adminId: state.adminId,
+    adminEpoch: state.adminEpoch,
+    revision: state.revision,
+    phase: state.phase,
+    roundId: state.round?.id ?? null,
+    roundNumber: state.round?.number ?? null,
+    stageIndex: state.round?.stageIndex ?? null,
+    revealBookIndex: state.round?.reveal?.bookIndex ?? null,
+    revealPageIndex: state.round?.reveal?.pageIndex ?? null,
+  }
+}
+
+export function isSyncCursorAhead(
+  remote: SyncCursor,
+  local: SyncCursor,
+): boolean {
+  if (remote.adminEpoch !== local.adminEpoch) {
+    return remote.adminEpoch > local.adminEpoch
+  }
+  if (remote.adminId !== local.adminId) return true
+  if (remote.revision !== local.revision) return remote.revision > local.revision
+  if (
+    remote.roundNumber !== local.roundNumber &&
+    remote.roundNumber !== null &&
+    local.roundNumber !== null
+  ) {
+    return remote.roundNumber > local.roundNumber
+  }
+  if (remote.roundId !== local.roundId) return true
+  if (
+    remote.stageIndex !== local.stageIndex &&
+    remote.stageIndex !== null &&
+    local.stageIndex !== null
+  ) {
+    return remote.stageIndex > local.stageIndex
+  }
+  if (
+    remote.revealBookIndex !== local.revealBookIndex &&
+    remote.revealBookIndex !== null &&
+    local.revealBookIndex !== null
+  ) {
+    return remote.revealBookIndex > local.revealBookIndex
+  }
+  return (
+    remote.revealPageIndex !== local.revealPageIndex &&
+    remote.revealPageIndex !== null &&
+    local.revealPageIndex !== null &&
+    remote.revealPageIndex > local.revealPageIndex
+  )
+}
+
+export function isAdminAuthoritativeSnapshot(
+  state: RoomState,
+  senderId: PlayerId,
+  sessionId: string,
+): boolean {
+  return (
+    senderId === state.adminId &&
+    sessionId === state.players[state.adminId]?.sessionId
+  )
 }
 
 function copyState(state: RoomState): RoomState {
@@ -713,6 +778,25 @@ export function mergeReplica(
   }
 
   return base
+}
+
+export function adoptAuthoritativeSnapshot(
+  local: RoomState | null,
+  incoming: RoomState,
+): RoomState {
+  if (!local || local.roomCode !== incoming.roomCode) {
+    return structuredClone(incoming)
+  }
+  if (incoming.adminEpoch > local.adminEpoch) {
+    return structuredClone(incoming)
+  }
+  if (incoming.adminEpoch < local.adminEpoch) return local
+  if (incoming.adminId !== local.adminId) {
+    return mergeReplica(local, incoming)
+  }
+  return incoming.revision >= local.revision
+    ? structuredClone(incoming)
+    : local
 }
 
 export function electAdmin(

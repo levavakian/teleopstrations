@@ -12,6 +12,16 @@ import type {
   WireMessage,
 } from './types'
 
+export const TURN_ISOLATION_MESSAGE =
+  'No peer link could be established. This static deployment has no TURN relay, so restrictive school, office, mobile, or carrier networks may isolate this device. Try a different network.'
+
+export function describeWebRtcJoinError(error: string): string {
+  if (/turn|exchanging sdp|ice/i.test(error)) {
+    return 'A direct WebRTC link failed. Updates will relay through connected players when possible; a completely isolated device needs a TURN service or a different network.'
+  }
+  return `A WebRTC peer link failed: ${error}`
+}
+
 interface BroadcastEnvelope {
   senderPeerId: string
   targetPeerId: string | null
@@ -148,7 +158,7 @@ class TrysteroTransport extends BaseTransport {
       },
       `game-v1:${roomCode}`,
       {
-        onJoinError: ({error}) => onError(error),
+        onJoinError: ({error}) => onError(describeWebRtcJoinError(error)),
       },
     )
     this.action = this.room.makeAction<JsonValue>('game-v1')

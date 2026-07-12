@@ -1,17 +1,21 @@
 import {describe, expect, it} from 'vitest'
 
 import {
+  adoptAuthoritativeSnapshot,
   advanceStage,
   applyIntent,
   createInitialRoom,
   electAdmin,
   getAssignment,
+  isAdminAuthoritativeSnapshot,
+  isSyncCursorAhead,
   joinPlayer,
   mergeReplica,
   nextAdminCandidate,
   playerIdForName,
   setPlayerConnected,
   startRound,
+  syncCursorForState,
 } from '../src/game'
 import type {
   Candidate,
@@ -320,6 +324,50 @@ describe('book rotation and finalization', () => {
 })
 
 describe('replication and administration', () => {
+  it('accepts snapshots only when authored by their declared admin session', () => {
+    const {state, sessions} = roomWithPlayers(3)
+
+    expect(
+      isAdminAuthoritativeSnapshot(
+        state,
+        state.adminId,
+        sessions[0].sessionId,
+      ),
+    ).toBe(true)
+    expect(
+      isAdminAuthoritativeSnapshot(
+        state,
+        sessions[1].id,
+        sessions[1].sessionId,
+      ),
+    ).toBe(false)
+    expect(
+      isAdminAuthoritativeSnapshot(state, state.adminId, 'stale-session'),
+    ).toBe(false)
+  })
+
+  it('detects and fast-forwards authoritative stage and reveal cursors', () => {
+    const {state} = roomWithPlayers(3)
+    const stageZero = startRound(state, 10_000, () => 0.999)
+    const stageOne = advanceStage(stageZero, 20_000)
+    const reveal = advanceStage(advanceStage(stageOne, 30_000), 40_000)
+
+    expect(
+      isSyncCursorAhead(
+        syncCursorForState(stageOne),
+        syncCursorForState(stageZero),
+      ),
+    ).toBe(true)
+    expect(mergeReplica(stageZero, stageOne).round?.stageIndex).toBe(1)
+    expect(
+      isSyncCursorAhead(
+        syncCursorForState(reveal),
+        syncCursorForState(stageOne),
+      ),
+    ).toBe(true)
+    expect(mergeReplica(stageOne, reveal).phase).toBe('reveal')
+  })
+
   it('elects the next connected player in frozen round order', () => {
     const {state, sessions} = roomWithPlayers(4)
     let started = startRound(state, 10_000, () => 0.999)
@@ -350,6 +398,21 @@ describe('replication and administration', () => {
       kind: 'text',
       text: 'Replicated backup',
     })
+  })
+
+  it('adopts the admin snapshot exactly without merging client-only state', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const authoritative = startRound(state, 10_000, () => 0.999)
+    const local = structuredClone(authoritative)
+    getAssignment(local, sessions[1].id)!.draft = candidate(
+      sessions[1],
+      9,
+      {kind: 'text', text: 'Client-only backup'},
+    )
+
+    const adopted = adoptAuthoritativeSnapshot(local, authoritative)
+    expect(getAssignment(adopted, sessions[1].id)?.draft).toBeNull()
+    expect(adopted).not.toBe(authoritative)
   })
 
   it('resolves competing admin elections by closest round successor', () => {

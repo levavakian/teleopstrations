@@ -17,15 +17,18 @@ import {
   normalizeName,
   normalizeRoomCode,
   playerIdForName,
+  syncCursorForState,
 } from './game'
 import type {
   Content,
   DrawingContent,
   GameSettings,
+  PeerSyncReport,
   PlayerSession,
   RoomSessionConfig,
   RoomState,
   Stroke,
+  SyncCursor,
   TextContent,
 } from './types'
 import {useGameRoom} from './useGameRoom'
@@ -311,9 +314,80 @@ function ConnectionPill({
   return (
     <div className="connection-pill" title={`${peerCount} direct peer connections`}>
       <span className={`status-dot${self?.connected ? ' is-online' : ''}`} />
-      {kind === 'webrtc' ? 'WebRTC mesh' : 'Local test mesh'} · {peerCount + 1}{' '}
-      online
+      {kind === 'webrtc'
+        ? `WebRTC · ${peerCount} direct ${peerCount === 1 ? 'link' : 'links'}`
+        : `Local test mesh · ${peerCount + 1} online`}
     </div>
+  )
+}
+
+function AdminSyncStatus({
+  state,
+  reports,
+}: {
+  state: RoomState
+  reports: Record<string, PeerSyncReport>
+}) {
+  const peers = state.joinOrder.filter((playerId) => playerId !== state.adminId)
+  if (!peers.length) return null
+  const adminCursor = syncCursorForState(state)
+  const sameLocation = (cursor: SyncCursor): boolean =>
+    cursor.adminId === adminCursor.adminId &&
+    cursor.adminEpoch === adminCursor.adminEpoch &&
+    cursor.phase === adminCursor.phase &&
+    cursor.roundId === adminCursor.roundId &&
+    cursor.stageIndex === adminCursor.stageIndex &&
+    cursor.revealBookIndex === adminCursor.revealBookIndex &&
+    cursor.revealPageIndex === adminCursor.revealPageIndex
+  const locationLabel = (cursor: SyncCursor): string => {
+    if (cursor.phase === 'stage') {
+      return `Stage ${(cursor.stageIndex ?? 0) + 1}`
+    }
+    if (cursor.phase === 'reveal') {
+      return `Playbook ${(cursor.revealBookIndex ?? 0) + 1}, page ${(cursor.revealPageIndex ?? 0) + 1}`
+    }
+    if (cursor.phase === 'closed') return 'Room closed'
+    return 'Lobby'
+  }
+  const syncedCount = peers.filter((playerId) => {
+    const report = reports[playerId]
+    return report ? sameLocation(report.cursor) : false
+  }).length
+
+  return (
+    <details className="sync-status">
+      <summary>
+        Player sync · {syncedCount}/{peers.length} on this page
+      </summary>
+      <ul>
+        {peers.map((playerId) => {
+          const report = reports[playerId]
+          const player = state.players[playerId]
+          const synced = report ? sameLocation(report.cursor) : false
+          return (
+            <li key={playerId} className={synced ? 'is-synced' : ''}>
+              <span
+                className="sync-status__mark"
+                aria-label={synced ? 'On the same page' : 'Not yet on this page'}
+              >
+                {synced ? '✓' : '…'}
+              </span>
+              <span className="sync-status__player">
+                <strong>{player?.name ?? playerId}</strong>
+                <small>
+                  {report
+                    ? `Last update: ${locationLabel(report.cursor)}`
+                    : 'Waiting for first update'}
+                </small>
+              </span>
+              <span className="sync-status__state">
+                {synced ? 'In sync' : `Admin: ${locationLabel(adminCursor)}`}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </details>
   )
 }
 
@@ -1275,6 +1349,9 @@ function Room({
         <div className="network-warning" role="status">
           Connection notice: {connection.error}
         </div>
+      ) : null}
+      {config.player.id === state.adminId ? (
+        <AdminSyncStatus state={state} reports={room.syncReports} />
       ) : null}
       {state.phase === 'closed' ? (
         <main className="connection-page connection-page--in-room">

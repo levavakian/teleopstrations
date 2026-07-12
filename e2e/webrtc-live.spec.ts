@@ -43,7 +43,7 @@ test('three browsers form a WebRTC mesh and synchronize game state', async ({
 
   for (const peer of [host, second, third]) {
     await expect(peer.locator('.connection-pill')).toContainText(
-      'WebRTC mesh · 3 online',
+      'WebRTC · 2 direct links',
       {timeout: 60_000},
     )
   }
