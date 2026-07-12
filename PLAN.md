@@ -15,8 +15,8 @@ Telestrations chain concurrently without a dedicated application server.
 - The round freezes player order; later arrivals wait until the next round.
 - Every frozen player starts one book, then receives the previous player's book
   on each alternating drawing/description stage.
-- A stage remains editable through its deadline and advances when that deadline
-  expires or when an admin force-advances it.
+- A stage advances as soon as every frozen player has submitted, when its
+  deadline expires, or when an admin force-advances it.
 - At a prompt deadline, the latest non-empty draft is accepted; an empty
   original prompt receives the specified player-name fallback. At drawing
   deadlines, the latest synchronized canvas is accepted.
@@ -104,9 +104,9 @@ work.
   using a measured coordinator-clock offset.
 - Text drafts are synchronized after changes and on blur. Drawing strokes are
   sent incrementally and checkpointed periodically.
-- `Submit` records that version and marks the player complete, but they may keep
-  editing and submit a newer version until the deadline. Stages remain open for
-  the configured duration unless the admin force-advances.
+- `Submit` records that version and marks the player complete. They may keep
+  editing and submit a newer version while other players are still working;
+  the stage advances immediately once everyone has submitted.
 - At timeout or admin force-advance:
   - submitted content wins;
   - otherwise the latest synchronized non-empty text draft wins;
@@ -144,6 +144,9 @@ non-canvas controls, visible focus, reduced motion, and narrow mobile layouts.
 - Update durations while in the lobby or between rounds.
 - Start a round with the currently active roster.
 - Force-advance the current stage using the same deadline finalization rules.
+- End an active round early by finalizing its current stage and entering reveal.
+- Kick players between rounds, blocking that normalized name from rejoining.
+- Close the ephemeral room for every connected player and discard round data.
 - Coordinate state changes requested by the current playbook owner or creator
   during the synchronized reveal.
 - Start the next round, promoting connected pending players.
@@ -247,7 +250,8 @@ the initial scope.
    book; that owner and the original room creator can move between its pages and
    advance to the next book.
 5. Players may continue editing after submitting and replace their submission
-   until the deadline. The latest explicit submission wins over a later draft.
+   until the deadline or until everyone has submitted. The latest explicit
+   submission wins over a later draft.
 6. Timer fields accept any positive integer. Defaults are 60 seconds for prompts
    and 120 seconds for drawings.
 7. Connected player order is randomized whenever a round starts.

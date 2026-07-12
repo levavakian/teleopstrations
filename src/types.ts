@@ -84,7 +84,7 @@ export interface RoundState {
   reveal: RevealState | null
 }
 
-export type GamePhase = 'lobby' | 'stage' | 'reveal'
+export type GamePhase = 'lobby' | 'stage' | 'reveal' | 'closed'
 
 export interface RoomState {
   protocolVersion: 1
@@ -97,6 +97,8 @@ export interface RoomState {
   settings: GameSettings
   players: Record<PlayerId, Player>
   joinOrder: PlayerId[]
+  blockedPlayerIds: PlayerId[]
+  closedAt: number | null
   phase: GamePhase
   round: RoundState | null
 }
@@ -112,6 +114,9 @@ export type ControlIntentRequest =
   | {type: 'settings'; settings: GameSettings}
   | {type: 'start-round'}
   | {type: 'force-advance'}
+  | {type: 'end-round'}
+  | {type: 'kick-player'; playerId: PlayerId}
+  | {type: 'close-room'}
   | {type: 'reveal-page'; pageIndex: number}
   | {type: 'reveal-book'; direction: 1 | -1}
   | {type: 'reset-lobby'}
@@ -136,6 +141,14 @@ export type GameIntent =
       previousRoundId: string | null
     }
   | {type: 'force-advance'; roundId: string; stageIndex: number}
+  | {type: 'end-round'; roundId: string; stageIndex: number}
+  | {
+      type: 'kick-player'
+      playerId: PlayerId
+      expectedPhase: 'lobby' | 'reveal'
+      previousRoundId: string | null
+    }
+  | {type: 'close-room'; roomCode: string}
   | {
       type: 'reveal-page'
       roundId: string

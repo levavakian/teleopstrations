@@ -392,6 +392,96 @@ describe('replication and administration', () => {
     expect(replacement).toBe(started)
   })
 
+  it('ends an active round by finalizing its current stage for reveal', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    let started = startRound(state, 10_000, () => 0.999)
+    started = applyIntent(
+      started,
+      envelope(sessions[0], {
+        type: 'draft',
+        roundId: started.round!.id,
+        stageIndex: 0,
+        candidate: candidate(sessions[0], 1, {
+          kind: 'text',
+          text: 'Reveal this early',
+        }),
+      }),
+      11_000,
+    )
+    const ended = applyIntent(
+      started,
+      envelope(sessions[0], {
+        type: 'end-round',
+        roundId: started.round!.id,
+        stageIndex: 0,
+      }),
+      12_000,
+    )
+
+    expect(ended.phase).toBe('reveal')
+    expect(ended.round?.reveal).toEqual({
+      bookIndex: 0,
+      pageIndex: 0,
+      complete: false,
+    })
+    expect(ended.round?.books[sessions[0].id].entries).toHaveLength(1)
+  })
+
+  it('kicks and blocks a player only between rounds', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const kicked = applyIntent(
+      state,
+      envelope(sessions[0], {
+        type: 'kick-player',
+        playerId: sessions[2].id,
+        expectedPhase: 'lobby',
+        previousRoundId: null,
+      }),
+      10_000,
+    )
+
+    expect(kicked.joinOrder).not.toContain(sessions[2].id)
+    expect(kicked.blockedPlayerIds).toContain(sessions[2].id)
+    expect(kicked.players[sessions[2].id].connected).toBe(false)
+    expect(
+      joinPlayer(kicked, {
+        ...sessions[2],
+        sessionId: 'attempted-return',
+        sessionStartedAt: 3_000,
+      }),
+    ).toBe(kicked)
+
+    const active = startRound(state, 10_000, () => 0.999)
+    const rejected = applyIntent(
+      active,
+      envelope(sessions[0], {
+        type: 'kick-player',
+        playerId: sessions[2].id,
+        expectedPhase: 'lobby',
+        previousRoundId: null,
+      }),
+      11_000,
+    )
+    expect(rejected).toBe(active)
+  })
+
+  it('closes a room and removes its active round data', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const started = startRound(state, 10_000, () => 0.999)
+    const closed = applyIntent(
+      started,
+      envelope(sessions[0], {
+        type: 'close-room',
+        roomCode: started.roomCode,
+      }),
+      12_345,
+    )
+
+    expect(closed.phase).toBe('closed')
+    expect(closed.round).toBeNull()
+    expect(closed.closedAt).toBe(12_345)
+  })
+
   it('migrates an existing assignment when its player rejoins', () => {
     const {state, sessions} = roomWithPlayers(3)
     let started = startRound(state, 10_000, () => 0.999)
