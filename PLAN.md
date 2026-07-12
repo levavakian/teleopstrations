@@ -24,11 +24,11 @@ Telestrations chain concurrently without a dedicated application server.
   and pending players without seeing hidden book content.
 - A disconnected player can reclaim their frozen seat and resume the current
   stage.
-- The completed books can be revealed, and the creator can start another round
+- The completed books can be revealed, and the admin can start another round
   that incorporates pending players.
 - A GitHub Actions workflow builds and deploys the static site to GitHub Pages.
 - Automated and manual tests demonstrate a complete multiplayer round,
-  deadline behavior, reconnection, pending players, and creator controls.
+  deadline behavior, reconnection, pending players, and admin controls.
 
 ## Proposed stack
 
@@ -64,7 +64,7 @@ public relay.
   connection state, readiness, and `active` or `pending` round status.
 - Starting a round snapshots the active ordered IDs. That snapshot never
   changes during the round. New players are visible as pending and join only
-  when the creator starts the next round.
+  when the admin starts the next round.
 - Rejoining restores the existing player record instead of adding a duplicate.
   The exact authentication policy is an open question below.
 
@@ -104,10 +104,10 @@ work.
   using a measured coordinator-clock offset.
 - Text drafts are synchronized after changes and on blur. Drawing strokes are
   sent incrementally and checkpointed periodically.
-- `Submit` freezes that player's accepted contribution for the stage and marks
-  them complete.
-- If everyone submits, the coordinator advances immediately.
-- At timeout or creator force-advance:
+- `Submit` records that version and marks the player complete, but they may keep
+  editing and submit a newer version until the deadline. Stages remain open for
+  the configured duration unless the admin force-advances.
+- At timeout or admin force-advance:
   - submitted content wins;
   - otherwise the latest synchronized non-empty text draft wins;
   - an empty initial prompt becomes
@@ -124,7 +124,7 @@ work.
 ## Screens and interaction
 
 1. **Landing:** create room or join by room code and name.
-2. **Lobby:** share code/link, show ordered active and pending players, creator
+2. **Lobby:** share code/link, show ordered active and pending players, admin
    settings, connection state, and start control.
 3. **Text stage:** previous drawing when applicable, prompt input, countdown,
    submit button, and submission progress.
@@ -144,12 +144,14 @@ non-canvas controls, visible focus, reduced motion, and narrow mobile layouts.
 - Update durations while in the lobby or between rounds.
 - Start a round with the currently active roster.
 - Force-advance the current stage using the same deadline finalization rules.
-- Drive the synchronized reveal.
+- Coordinate state changes requested by the current playbook owner or creator
+  during the synchronized reveal.
 - Start the next round, promoting connected pending players.
 - End/reset the current round after confirmation.
 
-Kicking players, transferring creator status, and acting-coordinator behavior
-depend on the answers below.
+The next connected player in the applicable order automatically inherits these
+controls when the current admin heartbeat times out. Kicking players is outside
+the initial scope.
 
 ## Reliability and limitations
 
@@ -161,8 +163,9 @@ depend on the answers below.
   inspect local JavaScript/state, forge client messages, or attempt to claim a
   name. The protocol will validate normal malformed/stale actions but is aimed
   at a trusted party-game group, not adversarial play.
-- Full-mesh WebRTC and canvas synchronization impose a practical room-size
-  limit. The initial recommendation is 3–12 players.
+- There is no configured maximum player count. Full-mesh WebRTC and full-state
+  replication still impose a practical device/network-dependent room-size
+  limit.
 - State snapshots will be replicated sufficiently for reconnection/coordinator
   recovery. They remain local to room peers and browser storage; no analytics or
   permanent cloud game history is planned.
@@ -203,7 +206,7 @@ depend on the answers below.
 
 - Unit-test assignment rotation and alternating content for every supported
   player count.
-- Use fake clocks to test early completion, prompt/drawing timeouts, fallback
+- Use fake clocks to test resubmission, prompt/drawing timeouts, fallback
   prompts, force-advance, and exactly-once transitions.
 - Test duplicate/stale/out-of-order messages and snapshot recovery.
 - Test disconnect/rejoin and pending-player promotion at the next round.
@@ -223,7 +226,7 @@ depend on the answers below.
   connection state.
 - Complete one full round containing text and drawing stages.
 - Exercise one submitted item, one deadline-captured draft, the missing initial
-  prompt fallback, and creator force-advance.
+  prompt fallback, and admin force-advance.
 - Disconnect and rejoin a frozen player with the same identity mid-stage.
 - Join a new player mid-round, confirm pending status, and promote them by
   starting the next round.
@@ -232,34 +235,21 @@ depend on the answers below.
 - Record the successful walkthrough and capture the final reveal as review
   artifacts.
 
-## Open questions
+## Resolved product decisions
 
-1. **Creator disconnects:** Should the game pause until the original creator
-   returns, or should a deterministic acting coordinator keep timers/stages
-   moving? Recommendation: elect an acting coordinator, retain creator-only
-   admin rights, and restore coordination to the creator safely at a stage
-   boundary.
-2. **Name-only rejoin:** Reclaiming a seat using only the same room code and
-   username means anyone can impersonate that player. Is that trust-based
-   behavior intentional, including from a different device? Recommendation:
-   persist a secret reconnect token automatically and require creator approval
-   only when the token is unavailable.
-3. **Player limits:** Is 3–12 players an acceptable supported range? The rules
-   technically work for two, but the experience and full-mesh tradeoffs are
-   better with at least three.
-4. **Reveal flow:** Should the creator advance a shared reveal item-by-item, or
-   should each player browse completed books independently? Recommendation:
-   synchronized creator-led reveal, then unlock free browsing after all books.
-5. **Submission editing:** Should `Submit` be final for the current stage, or
-   may a player continue editing/resubmit until everyone submits or time
-   expires? Recommendation: final submission, with a confirmation only for a
-   blank canvas/description.
-6. **Timer defaults and bounds:** What defaults and allowed range should the UI
-   use? Recommendation: 60 seconds for prompts, 90 seconds for drawings, and a
-   10–600 second range, editable between rounds.
-7. **Round order:** Should player order stay fixed between rounds or be
-   reshuffled when the creator starts the next round? Recommendation: keep join
-   order by default and offer an explicit shuffle control.
-8. **GitHub Pages:** The workflow can be committed here, but the repository may
-   need **Settings → Pages → Source: GitHub Actions** enabled once. Is the
-   standard repository URL sufficient, or is a custom domain required?
+1. Every peer receives the full replicated state. If the admin heartbeat times
+   out, the next connected player in the frozen round order (or lobby join
+   order) becomes admin and resumes coordination.
+2. Room code plus normalized name is sufficient to reclaim a seat; this is an
+   intentionally trust-based party game.
+3. Rounds require at least three players and have no configured maximum.
+4. Playbooks are revealed in round order. Each prompt owner presents their own
+   book; that owner and the original room creator can move between its pages and
+   advance to the next book.
+5. Players may continue editing after submitting and replace their submission
+   until the deadline. The latest explicit submission wins over a later draft.
+6. Timer fields accept any positive integer. Defaults are 60 seconds for prompts
+   and 120 seconds for drawings.
+7. Connected player order is randomized whenever a round starts.
+8. Deployment uses the standard repository GitHub Pages URL, with Pages already
+   configured to use GitHub Actions.
