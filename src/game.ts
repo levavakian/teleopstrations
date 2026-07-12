@@ -126,6 +126,7 @@ export function createInitialRoom(
     roomCode: normalizeRoomCode(roomCode),
     creatorId: creator.id,
     adminId: creator.id,
+    adminPredecessorId: null,
     adminEpoch: 0,
     revision: 0,
     settings,
@@ -144,9 +145,32 @@ export function joinPlayer(
   const existing = next.players[session.id]
 
   if (existing) {
+    const incomingIsNewer =
+      session.sessionStartedAt > existing.sessionStartedAt ||
+      (session.sessionStartedAt === existing.sessionStartedAt &&
+        session.sessionId >= existing.sessionId)
+    if (!incomingIsNewer) return state
     existing.name = session.name
     existing.sessionId = session.sessionId
+    existing.sessionStartedAt = session.sessionStartedAt
     existing.connected = true
+    const assignment = next.round?.assignments[session.id]
+    if (assignment) {
+      if (assignment.draft) {
+        assignment.draft = {
+          ...assignment.draft,
+          seq: 0,
+          sessionId: session.sessionId,
+        }
+      }
+      if (assignment.submission) {
+        assignment.submission = {
+          ...assignment.submission,
+          seq: 0,
+          sessionId: session.sessionId,
+        }
+      }
+    }
   } else {
     next.players[session.id] = {
       ...session,
@@ -308,19 +332,36 @@ export function applyIntent(
   }
 
   if (intent.type === 'start-round') {
-    return isAdminControl(state, envelope.senderId)
+    const validPhase =
+      (state.phase === 'lobby' &&
+        intent.expectedPhase === 'lobby' &&
+        intent.previousRoundId === null) ||
+      (state.phase === 'reveal' &&
+        state.round?.reveal?.complete &&
+        intent.expectedPhase === 'reveal' &&
+        intent.previousRoundId === state.round.id)
+    return isAdminControl(state, envelope.senderId) && validPhase
       ? startRound(state, now, random)
       : state
   }
 
   if (intent.type === 'force-advance') {
-    return isAdminControl(state, envelope.senderId)
+    return isAdminControl(state, envelope.senderId) &&
+      state.phase === 'stage' &&
+      state.round?.id === intent.roundId &&
+      state.round.stageIndex === intent.stageIndex
       ? advanceStage(state, now)
       : state
   }
 
   if (intent.type === 'reset-lobby') {
-    if (!isAdminControl(state, envelope.senderId)) return state
+    if (
+      !isAdminControl(state, envelope.senderId) ||
+      !state.round ||
+      intent.roundId !== state.round.id
+    ) {
+      return state
+    }
     const next = copyState(state)
     next.phase = 'lobby'
     next.round = null
@@ -338,7 +379,13 @@ export function applyIntent(
 
   if (intent.type === 'reveal-page') {
     const book = getCurrentRevealBook(state)
-    if (!book) return state
+    if (
+      !book ||
+      intent.roundId !== state.round.id ||
+      intent.bookIndex !== state.round.reveal.bookIndex
+    ) {
+      return state
+    }
     const next = copyState(state)
     next.round!.reveal!.pageIndex = Math.max(
       0,
@@ -349,6 +396,12 @@ export function applyIntent(
   }
 
   if (intent.type === 'reveal-book') {
+    if (
+      intent.roundId !== state.round.id ||
+      intent.bookIndex !== state.round.reveal.bookIndex
+    ) {
+      return state
+    }
     const next = copyState(state)
     const reveal = next.round!.reveal!
     const target = reveal.bookIndex + intent.direction
@@ -428,6 +481,15 @@ function finalizedContent(
 
 export function advanceStage(state: RoomState, now: number): RoomState {
   if (state.phase !== 'stage' || !state.round) return state
+  if (
+    Object.values(state.round.books).some((book) =>
+      book.entries.some(
+        ({stageIndex}) => stageIndex === state.round!.stageIndex,
+      ),
+    )
+  ) {
+    return state
+  }
 
   const next = copyState(state)
   const round = next.round!
@@ -478,10 +540,27 @@ export function mergeReplica(
 ): RoomState {
   if (!local || local.roomCode !== incoming.roomCode) return incoming
 
+  const electionDistance = (state: RoomState): number => {
+    const ring =
+      state.round && state.phase !== 'lobby'
+        ? state.round.order
+        : state.joinOrder
+    const predecessorIndex = ring.indexOf(state.adminPredecessorId ?? '')
+    const adminIndex = ring.indexOf(state.adminId)
+    if (predecessorIndex < 0 || adminIndex < 0) return Number.MAX_SAFE_INTEGER
+    return (adminIndex - predecessorIndex + ring.length) % ring.length
+  }
+
+  const incomingElectionWins =
+    electionDistance(incoming) < electionDistance(local) ||
+    (electionDistance(incoming) === electionDistance(local) &&
+      incoming.adminId < local.adminId)
   const incomingWins =
     incoming.adminEpoch > local.adminEpoch ||
     (incoming.adminEpoch === local.adminEpoch &&
-      incoming.revision >= local.revision)
+      (incoming.adminId === local.adminId
+        ? incoming.revision >= local.revision
+        : incomingElectionWins))
   const base = copyState(incomingWins ? incoming : local)
   const other = incomingWins ? local : incoming
 
@@ -515,12 +594,22 @@ export function mergeReplica(
 export function electAdmin(
   state: RoomState,
   adminId: PlayerId,
+  now: number = Date.now(),
+  previousClockOffset = 0,
 ): RoomState {
   if (!state.players[adminId] || state.adminId === adminId) return state
   const next = copyState(state)
+  next.adminPredecessorId = state.adminId
   next.adminId = adminId
   next.adminEpoch += 1
   next.revision += 1
+  if (next.phase === 'stage' && next.round) {
+    const remaining = Math.max(
+      0,
+      next.round.deadline - (now + previousClockOffset),
+    )
+    next.round.deadline = now + remaining
+  }
   return next
 }
 

@@ -24,7 +24,12 @@ import type {
 
 function player(name: string): PlayerSession {
   const id = playerIdForName(name)
-  return {id, name, sessionId: `session-${id}`}
+  return {
+    id,
+    name,
+    sessionId: `session-${id}`,
+    sessionStartedAt: 1_000,
+  }
 }
 
 function roomWithPlayers(count: number): {
@@ -121,15 +126,59 @@ describe('room and round lifecycle', () => {
 
   it('reclaims an existing name without adding another roster entry', () => {
     const {state} = roomWithPlayers(3)
-    const replacement = {...player('Player 2'), sessionId: 'replacement-tab'}
+    const replacement = {
+      ...player('Player 2'),
+      sessionId: 'replacement-tab',
+      sessionStartedAt: 2_000,
+    }
     const joined = joinPlayer(state, replacement)
 
     expect(joined.joinOrder).toHaveLength(3)
     expect(joined.players[replacement.id].sessionId).toBe('replacement-tab')
   })
+
+  it('ignores an older tab after a newer same-name session takes over', () => {
+    const {state} = roomWithPlayers(3)
+    const current = {
+      ...player('Player 2'),
+      sessionId: 'new-tab',
+      sessionStartedAt: 2_000,
+    }
+    const reclaimed = joinPlayer(state, current)
+    const stalePresence = player('Player 2')
+
+    expect(joinPlayer(reclaimed, stalePresence)).toBe(reclaimed)
+    expect(reclaimed.players[current.id].sessionId).toBe('new-tab')
+  })
 })
 
 describe('book rotation and finalization', () => {
+  it.each([3, 4, 5, 8, 20])(
+    'rotates authors correctly for %i players',
+    (count) => {
+      const {state} = roomWithPlayers(count)
+      let current = startRound(state, 10_000, () => 0.999)
+      const order = current.round!.order
+
+      for (let stage = 0; stage < count; stage += 1) {
+        current = advanceStage(current, 20_000 + stage * 1_000)
+      }
+
+      for (let ownerIndex = 0; ownerIndex < count; ownerIndex += 1) {
+        expect(
+          current.round!.books[order[ownerIndex]].entries.map(
+            ({authorId}) => authorId,
+          ),
+        ).toEqual(
+          Array.from(
+            {length: count},
+            (_, stage) => order[(ownerIndex + stage) % count],
+          ),
+        )
+      }
+    },
+  )
+
   it('rotates every book through every other player and alternates content', () => {
     const {state, sessions} = roomWithPlayers(3)
     let current = startRound(state, 10_000, () => 0.999)
@@ -303,6 +352,70 @@ describe('replication and administration', () => {
     })
   })
 
+  it('resolves competing admin elections by closest round successor', () => {
+    const {state, sessions} = roomWithPlayers(4)
+    const started = startRound(state, 10_000, () => 0.999)
+    const immediate = electAdmin(started, sessions[1].id, 11_000)
+    const later = electAdmin(started, sessions[2].id, 11_000)
+
+    expect(mergeReplica(later, immediate).adminId).toBe(sessions[1].id)
+    expect(mergeReplica(immediate, later).adminId).toBe(sessions[1].id)
+  })
+
+  it('rejects a duplicate force-advance after its stage has changed', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const started = startRound(state, 10_000, () => 0.999)
+    const force = envelope(sessions[0], {
+      type: 'force-advance',
+      roundId: started.round!.id,
+      stageIndex: 0,
+    })
+    const advanced = applyIntent(started, force, 11_000)
+
+    expect(advanced.round?.stageIndex).toBe(1)
+    expect(applyIntent(advanced, force, 12_000)).toBe(advanced)
+  })
+
+  it('cannot start a replacement round while a stage is active', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const started = startRound(state, 10_000, () => 0.999)
+    const replacement = applyIntent(
+      started,
+      envelope(sessions[0], {
+        type: 'start-round',
+        expectedPhase: 'lobby',
+        previousRoundId: null,
+      }),
+      11_000,
+    )
+
+    expect(replacement).toBe(started)
+  })
+
+  it('migrates an existing assignment when its player rejoins', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    let started = startRound(state, 10_000, () => 0.999)
+    started = submitForCurrentStage(
+      started,
+      sessions[1],
+      {kind: 'text', text: 'Keep me'},
+      7,
+    )
+    const replacement = {
+      ...sessions[1],
+      sessionId: 'new-session',
+      sessionStartedAt: 2_000,
+    }
+    const rejoined = joinPlayer(started, replacement)
+    const submission = getAssignment(rejoined, sessions[1].id)?.submission
+
+    expect(submission).toMatchObject({
+      seq: 0,
+      sessionId: 'new-session',
+      content: {kind: 'text', text: 'Keep me'},
+    })
+  })
+
   it('allows only the current book owner or creator to move reveal pages', () => {
     const {state, sessions} = roomWithPlayers(3)
     let current = startRound(state, 10_000, () => 0.999)
@@ -318,14 +431,24 @@ describe('replication and administration', () => {
 
     const rejected = applyIntent(
       current,
-      envelope(unauthorized, {type: 'reveal-page', pageIndex: 1}),
+      envelope(unauthorized, {
+        type: 'reveal-page',
+        roundId: current.round!.id,
+        bookIndex: 0,
+        pageIndex: 1,
+      }),
       41_000,
     )
     expect(rejected).toBe(current)
 
     const accepted = applyIntent(
       current,
-      envelope(owner, {type: 'reveal-page', pageIndex: 1}),
+      envelope(owner, {
+        type: 'reveal-page',
+        roundId: current.round!.id,
+        bookIndex: 0,
+        pageIndex: 1,
+      }),
       41_000,
     )
     expect(accepted.round?.reveal?.pageIndex).toBe(1)

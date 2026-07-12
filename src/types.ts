@@ -13,6 +13,7 @@ export interface Player {
   joinIndex: number
   connected: boolean
   sessionId: string
+  sessionStartedAt: number
 }
 
 export interface DrawPoint {
@@ -90,6 +91,7 @@ export interface RoomState {
   roomCode: string
   creatorId: PlayerId
   adminId: PlayerId
+  adminPredecessorId: PlayerId | null
   adminEpoch: number
   revision: number
   settings: GameSettings
@@ -103,7 +105,16 @@ export interface PlayerSession {
   id: PlayerId
   name: string
   sessionId: string
+  sessionStartedAt: number
 }
+
+export type ControlIntentRequest =
+  | {type: 'settings'; settings: GameSettings}
+  | {type: 'start-round'}
+  | {type: 'force-advance'}
+  | {type: 'reveal-page'; pageIndex: number}
+  | {type: 'reveal-book'; direction: 1 | -1}
+  | {type: 'reset-lobby'}
 
 export type GameIntent =
   | {
@@ -119,11 +130,25 @@ export type GameIntent =
       candidate: Candidate
     }
   | {type: 'settings'; settings: GameSettings}
-  | {type: 'start-round'}
-  | {type: 'force-advance'}
-  | {type: 'reveal-page'; pageIndex: number}
-  | {type: 'reveal-book'; direction: 1 | -1}
-  | {type: 'reset-lobby'}
+  | {
+      type: 'start-round'
+      expectedPhase: 'lobby' | 'reveal'
+      previousRoundId: string | null
+    }
+  | {type: 'force-advance'; roundId: string; stageIndex: number}
+  | {
+      type: 'reveal-page'
+      roundId: string
+      bookIndex: number
+      pageIndex: number
+    }
+  | {
+      type: 'reveal-book'
+      roundId: string
+      bookIndex: number
+      direction: 1 | -1
+    }
+  | {type: 'reset-lobby'; roundId: string}
 
 export interface IntentEnvelope {
   id: string
@@ -146,6 +171,8 @@ export type WireMessage =
   | {
       type: 'heartbeat'
       adminId: PlayerId
+      senderId: PlayerId
+      sessionId: string
       adminEpoch: number
       revision: number
       sentAt: number

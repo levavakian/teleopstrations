@@ -495,6 +495,39 @@ textarea::placeholder {
   line-height: 1.7;
 }
 
+.lobby-invite {
+  display: grid;
+  margin-top: 1.5rem;
+  padding: 1rem 1.15rem;
+  border: 1px dashed #b8aa98;
+  border-radius: 0.6rem;
+  align-items: center;
+  grid-template-columns: auto auto 1fr;
+  gap: 1rem;
+  background: #f8f2e8;
+}
+
+.lobby-invite > span {
+  color: var(--coral-dark);
+  font-family: 'DM Mono', monospace;
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.lobby-invite > strong {
+  font-family: 'DM Mono', monospace;
+  font-size: 1.2rem;
+  letter-spacing: 0.08em;
+}
+
+.lobby-invite > small {
+  color: var(--muted);
+  font-size: 0.65rem;
+  text-align: right;
+}
+
 .lobby-count {
   display: flex;
   margin: 2.2rem 0;
@@ -1349,6 +1382,15 @@ textarea::placeholder {
   .timer-fields,
   .settings-editor {
     grid-template-columns: 1fr;
+  }
+
+  .lobby-invite {
+    grid-template-columns: auto 1fr;
+  }
+
+  .lobby-invite > small {
+    grid-column: 1 / -1;
+    text-align: left;
   }
 
   .room-header {

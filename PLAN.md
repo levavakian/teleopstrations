@@ -15,8 +15,8 @@ Telestrations chain concurrently without a dedicated application server.
 - The round freezes player order; later arrivals wait until the next round.
 - Every frozen player starts one book, then receives the previous player's book
   on each alternating drawing/description stage.
-- A stage advances when every active player submits or when its deadline (or an
-  admin action) ends it.
+- A stage remains editable through its deadline and advances when that deadline
+  expires or when an admin force-advances it.
 - At a prompt deadline, the latest non-empty draft is accepted; an empty
   original prompt receives the specified player-name fallback. At drawing
   deadlines, the latest synchronized canvas is accepted.
