@@ -22,6 +22,117 @@ export function describeWebRtcJoinError(error: string): string {
   return `A WebRTC peer link failed: ${error}`
 }
 
+const WIRE_MESSAGE_TYPES = new Set([
+  'join',
+  'presence',
+  'heartbeat',
+  'intent',
+  'intent-ack',
+  'snapshot',
+  'sync-request',
+  'sync-report',
+])
+
+export function isValidWireMessage(value: unknown): value is WireMessage {
+  if (!value || typeof value !== 'object') return false
+  const message = value as Partial<WireMessage>
+  if (
+    typeof message.type !== 'string' ||
+    !WIRE_MESSAGE_TYPES.has(message.type) ||
+    typeof message.messageId !== 'string' ||
+    message.messageId.length < 1 ||
+    message.messageId.length > 128 ||
+    !Number.isInteger(message.hopsRemaining) ||
+    (message.hopsRemaining ?? -1) < 0 ||
+    (message.hopsRemaining ?? 65) > 64
+  ) {
+    return false
+  }
+  try {
+    if (JSON.stringify(value).length > 4_000_000) return false
+  } catch {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  const object = (candidate: unknown): Record<string, unknown> | null =>
+    candidate && typeof candidate === 'object'
+      ? (candidate as Record<string, unknown>)
+      : null
+  if (message.type === 'join' || message.type === 'presence') {
+    const player = object(record.player)
+    return Boolean(
+      player &&
+        typeof player.id === 'string' &&
+        typeof player.name === 'string' &&
+        typeof player.sessionId === 'string' &&
+        typeof player.sessionStartedAt === 'number',
+    )
+  }
+  if (message.type === 'intent') {
+    const envelope = object(record.envelope)
+    const intent = envelope ? object(envelope.intent) : null
+    const candidate = intent ? object(intent.candidate) : null
+    const content = candidate ? object(candidate.content) : null
+    return Boolean(
+      envelope &&
+        typeof envelope.id === 'string' &&
+        typeof envelope.senderId === 'string' &&
+        typeof envelope.sessionId === 'string' &&
+        intent &&
+        typeof intent.type === 'string' &&
+        (intent.type !== 'draft' && intent.type !== 'submit'
+          ? true
+          : candidate &&
+            content &&
+            typeof candidate.sessionId === 'string' &&
+            typeof candidate.seq === 'number' &&
+            (content.kind === 'text' || content.kind === 'drawing')),
+    )
+  }
+  if (message.type === 'intent-ack') {
+    return (
+      typeof record.senderId === 'string' &&
+      typeof record.sessionId === 'string' &&
+      typeof record.targetPlayerId === 'string' &&
+      typeof record.intentId === 'string' &&
+      typeof record.accepted === 'boolean'
+    )
+  }
+  if (message.type === 'snapshot') {
+    const state = object(record.state)
+    return Boolean(
+      state &&
+        typeof record.senderId === 'string' &&
+        typeof record.sessionId === 'string' &&
+        typeof state.roomCode === 'string' &&
+        typeof state.creatorId === 'string' &&
+        typeof state.revision === 'number' &&
+        object(state.players) &&
+        Array.isArray(state.joinOrder) &&
+        typeof state.phase === 'string',
+    )
+  }
+  if (message.type === 'heartbeat') {
+    return (
+      typeof record.creatorId === 'string' &&
+      typeof record.senderId === 'string' &&
+      typeof record.sessionId === 'string' &&
+      object(record.cursor) !== null
+    )
+  }
+  if (message.type === 'sync-request' || message.type === 'sync-report') {
+    return (
+      typeof record.roomCode === 'string' &&
+      typeof record.senderId === 'string' &&
+      typeof record.sessionId === 'string' &&
+      (message.type === 'sync-request'
+        ? record.cursor === null || object(record.cursor) !== null
+        : object(record.cursor) !== null)
+    )
+  }
+  return false
+}
+
 interface BroadcastEnvelope {
   senderPeerId: string
   targetPeerId: string | null
@@ -85,7 +196,7 @@ class BroadcastTransport extends BaseTransport {
 
   constructor(roomCode: string) {
     super()
-    this.channel = new BroadcastChannel(`teleopstrations:${roomCode}`)
+    this.channel = new BroadcastChannel(`teleopstrations:v2:${roomCode}`)
     this.channel.onmessage = (event: MessageEvent<BroadcastEnvelope>) => {
       const envelope = event.data
       if (
@@ -153,15 +264,15 @@ class TrysteroTransport extends BaseTransport {
     super()
     this.room = joinRoom(
       {
-        appId: 'io.github.levavakian.teleopstrations.v1',
+        appId: 'io.github.levavakian.teleopstrations.v2',
         relayConfig: {redundancy: 5},
       },
-      `game-v1:${roomCode}`,
+      `game-v2:${roomCode}`,
       {
         onJoinError: ({error}) => onError(describeWebRtcJoinError(error)),
       },
     )
-    this.action = this.room.makeAction<JsonValue>('game-v1')
+    this.action = this.room.makeAction<JsonValue>('game-v2')
     this.action.onMessage = (data, {peerId}) => {
       this.emitMessage(data as unknown as WireMessage, peerId)
     }

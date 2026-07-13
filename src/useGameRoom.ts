@@ -3,24 +3,26 @@ import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {
   adoptAuthoritativeSnapshot,
   advanceStage,
-  applyBackupIntent,
   applyIntent,
   createId,
   createInitialRoom,
-  electAdmin,
   getSubmissionCount,
   hydrateRoomState,
   intentForCandidate,
-  isAdminAuthoritativeSnapshot,
+  isCreatorAuthoritativeSnapshot,
   isSyncCursorAhead,
   joinPlayer,
-  nextAdminCandidate,
+  normalizeName,
+  playerIdForName,
+  reclaimCreatorSession,
+  reclaimPlayerSession,
   setPlayerConnected,
   syncCursorForState,
 } from './game'
 import {
   TURN_ISOLATION_MESSAGE,
   createTransport,
+  isValidWireMessage,
   type GameTransport,
 } from './network'
 import type {
@@ -45,10 +47,23 @@ const SYNC_INTERVAL_MS = 15_000
 const ISOLATED_PEER_WARNING_MS = 15_000
 const GOSSIP_HOP_LIMIT = 8
 const MAX_SEEN_MESSAGE_IDS = 2_000
+const MAX_PENDING_INTENTS = 100
 const EMPTY_TRANSPORT: TransportSnapshot = {
   kind: 'webrtc',
   selfPeerId: '',
   peers: [],
+}
+
+interface PendingIntent {
+  envelope: IntentEnvelope
+  attempts: number
+  nextRetryAt: number
+}
+
+interface IntentResult {
+  accepted: boolean
+  revision: number
+  kind: GameIntent['type']
 }
 
 function storageKey(config: RoomSessionConfig): string {
@@ -62,12 +77,13 @@ function loadCachedState(config: RoomSessionConfig): RoomState | null {
     if (!serialized) return null
     const cached = JSON.parse(serialized) as RoomState
     if (
-      cached.protocolVersion !== 1 ||
+      ![1, 2].includes(Number(cached.protocolVersion)) ||
       cached.roomCode !== config.roomCode
     ) {
       return null
     }
-    return joinPlayer(hydrateRoomState(cached), config.player)
+    const hydrated = hydrateRoomState(cached)
+    return hydrated
   } catch {
     return null
   }
@@ -84,10 +100,33 @@ function initialRoom(config: RoomSessionConfig): RoomState | null {
   return loadCachedState(config)
 }
 
+function isLocalCreatorAuthority(
+  state: RoomState,
+  config: RoomSessionConfig,
+): boolean {
+  return (
+    state.creatorId === config.player.id &&
+    state.players[state.creatorId]?.sessionId === config.player.sessionId
+  )
+}
+
+function isValidPlayerSession(player: RoomSessionConfig['player']): boolean {
+  const name = normalizeName(player.name)
+  return (
+    name.length > 0 &&
+    name.length <= 36 &&
+    player.id === playerIdForName(name) &&
+    typeof player.sessionId === 'string' &&
+    player.sessionId.length <= 128 &&
+    Number.isFinite(player.sessionStartedAt)
+  )
+}
+
 export interface GameRoomApi {
   state: RoomState | null
   connection: RoomConnection
   clockOffsetMs: number
+  creatorConnected: boolean
   syncReports: Record<string, PeerSyncReport>
   sendDraft(content: Content): void
   submit(content: Content): void
@@ -108,6 +147,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     error: null,
   })
   const [clockOffsetMs, setClockOffsetMs] = useState(0)
+  const [creatorConnected, setCreatorConnected] = useState(true)
   const [syncReports, setSyncReports] = useState<
     Record<string, PeerSyncReport>
   >({})
@@ -115,18 +155,20 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
   const transportRef = useRef<GameTransport | null>(null)
   const sequenceRef = useRef(0)
   const playerLastSeenRef = useRef(new Map<string, number>())
-  const peerPlayerRef = useRef(new Map<string, string>())
-  const adminLastSeenRef = useRef(Date.now())
+  const creatorLastSeenRef = useRef(Date.now())
   const lastSnapshotSentRef = useRef(0)
   const lastHeartbeatSentRef = useRef(0)
   const lastSyncRequestRef = useRef(0)
   const connectionStartedRef = useRef(Date.now())
   const clockOffsetRef = useRef(0)
-  const seenIntentIdsRef = useRef(new Set<string>())
+  const intentResultsRef = useRef(new Map<string, IntentResult>())
+  const pendingIntentsRef = useRef(new Map<string, PendingIntent>())
   const seenMessageIdsRef = useRef(new Set<string>())
   const latestAuthoritativeSnapshotRef = useRef<
     Extract<WireMessage, {type: 'snapshot'}> | null
   >(null)
+  const recoveryCandidatesRef = useRef<RoomState[]>([])
+  const recoveryTimerRef = useRef<number | null>(null)
 
   const persist = useCallback(
     (next: RoomState) => {
@@ -176,7 +218,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       next: RoomState,
       reason: Extract<WireMessage, {type: 'snapshot'}>['reason'],
     ) => {
-      if (next.adminId !== config.player.id) return
+      if (!isLocalCreatorAuthority(next, config)) return
       const message: Extract<WireMessage, {type: 'snapshot'}> = {
         type: 'snapshot',
         messageId: createId(),
@@ -191,14 +233,19 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       lastSnapshotSentRef.current = message.sentAt
       originate(message)
     },
-    [config.player.id, config.player.sessionId, originate],
+    [config, originate],
   )
 
   const recordSyncReport = useCallback(
-    (playerId: string, cursor: SyncCursor, receivedAt: number) => {
+    (
+      playerId: string,
+      sessionId: string,
+      cursor: SyncCursor,
+      receivedAt: number,
+    ) => {
       setSyncReports((current) => ({
         ...current,
-        [playerId]: {playerId, cursor, receivedAt},
+        [playerId]: {playerId, sessionId, cursor, receivedAt},
       }))
     },
     [],
@@ -206,7 +253,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
   const sendSyncReport = useCallback(
     (current: RoomState) => {
-      if (current.adminId === config.player.id) return
+      if (isLocalCreatorAuthority(current, config)) return
       originate({
         type: 'sync-report',
         messageId: createId(),
@@ -218,18 +265,13 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         sentAt: Date.now(),
       })
     },
-    [
-      config.player.id,
-      config.player.sessionId,
-      config.roomCode,
-      originate,
-    ],
+    [config, originate],
   )
 
   const sendSyncRequest = useCallback(
     (reason: Extract<WireMessage, {type: 'sync-request'}>['reason']) => {
       const current = stateRef.current
-      if (current?.adminId === config.player.id) return
+      if (current && isLocalCreatorAuthority(current, config)) return
       const now = Date.now()
       if (
         reason === 'cursor-ahead' &&
@@ -250,12 +292,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         sentAt: now,
       })
     },
-    [
-      config.player.id,
-      config.player.sessionId,
-      config.roomCode,
-      originate,
-    ],
+    [config, originate],
   )
 
   const publishState = useCallback(
@@ -274,48 +311,125 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     (envelope: IntentEnvelope, announceIntent: boolean) => {
       const current = stateRef.current
       if (!current) return
+      const isCreator = isLocalCreatorAuthority(current, config)
 
-      if (announceIntent) {
+      if (announceIntent && !isCreator) {
+        if (
+          envelope.intent.type === 'draft' ||
+          envelope.intent.type === 'submit'
+        ) {
+          for (const [id, pending] of pendingIntentsRef.current) {
+            const intent = pending.envelope.intent
+            if (
+              intent.type === envelope.intent.type &&
+              (intent.type === 'draft' || intent.type === 'submit') &&
+              intent.roundId === envelope.intent.roundId &&
+              intent.stageIndex === envelope.intent.stageIndex
+            ) {
+              pendingIntentsRef.current.delete(id)
+            }
+          }
+        }
+        while (pendingIntentsRef.current.size >= MAX_PENDING_INTENTS) {
+          const removable = Array.from(pendingIntentsRef.current).find(
+            ([, pending]) => pending.envelope.intent.type === 'draft',
+          )
+          const oldest =
+            removable ?? pendingIntentsRef.current.entries().next().value
+          if (!oldest) break
+          pendingIntentsRef.current.delete(oldest[0])
+        }
+        pendingIntentsRef.current.set(envelope.id, {
+          envelope,
+          attempts: 0,
+          nextRetryAt: Date.now() + 1_000,
+        })
         originate({
           type: 'intent',
-          messageId: envelope.id,
+          messageId: createId(),
           hopsRemaining: GOSSIP_HOP_LIMIT,
           envelope,
         })
+        return
       }
 
-      if (current.adminId === config.player.id) {
-        if (seenIntentIdsRef.current.has(envelope.id)) return
-        seenIntentIdsRef.current.add(envelope.id)
-        if (seenIntentIdsRef.current.size > 1_000) {
-          const oldest = seenIntentIdsRef.current.values().next().value
-          if (oldest) seenIntentIdsRef.current.delete(oldest)
-        }
-        const now = Date.now()
-        let next = applyIntent(current, envelope, now)
-        if (
-          envelope.intent.type === 'submit' &&
-          next.phase === 'stage' &&
-          next.round &&
-          getSubmissionCount(next) === next.round.order.length
-        ) {
-          next = advanceStage(next, now)
+      if (isCreator) {
+        const previousResult = intentResultsRef.current.get(envelope.id)
+        const intent = envelope.intent
+        const assignment =
+          (intent.type === 'draft' || intent.type === 'submit') &&
+          current.round?.id === intent.roundId &&
+          current.round.stageIndex === intent.stageIndex
+            ? current.round.assignments[envelope.senderId]
+            : null
+        const existingCandidate =
+          intent.type === 'draft'
+            ? assignment?.draft
+            : intent.type === 'submit'
+              ? assignment?.submission
+              : null
+        const alreadyApplied = Boolean(
+          existingCandidate &&
+            (intent.type === 'draft' || intent.type === 'submit') &&
+            existingCandidate.sessionId === intent.candidate.sessionId &&
+            existingCandidate.seq >= intent.candidate.seq,
+        )
+        let accepted = previousResult?.accepted ?? alreadyApplied
+        let next = current
+        if (!previousResult) {
+          const now = Date.now()
+          next = applyIntent(current, envelope, now)
+          accepted = alreadyApplied || next !== current
+          if (
+            envelope.intent.type === 'submit' &&
+            next.phase === 'stage' &&
+            next.round &&
+            getSubmissionCount(next) === next.round.order.length
+          ) {
+            next = advanceStage(next, now)
+          }
+          if (envelope.senderId !== config.player.id) {
+            intentResultsRef.current.set(envelope.id, {
+              accepted,
+              revision: next.revision,
+              kind: envelope.intent.type,
+            })
+            if (intentResultsRef.current.size > 1_000) {
+              const removable = Array.from(intentResultsRef.current).find(
+                ([, result]) => result.kind === 'draft',
+              )
+              const oldest =
+                removable ?? intentResultsRef.current.entries().next().value
+              if (oldest) intentResultsRef.current.delete(oldest[0])
+            }
+          }
         }
         if (next !== current) {
-          const isCandidate =
-            envelope.intent.type === 'draft' ||
-            envelope.intent.type === 'submit'
           const stageTransitioned =
             next.phase !== current.phase ||
             next.round?.stageIndex !== current.round?.stageIndex
-          publishState(next, !isCandidate || stageTransitioned)
+          publishState(
+            next,
+            envelope.intent.type !== 'draft' || stageTransitioned,
+          )
         }
-      } else {
-        const next = applyBackupIntent(current, envelope)
-        if (next !== current) publishState(next, false)
+        if (envelope.senderId !== config.player.id) {
+          originate({
+            type: 'intent-ack',
+            messageId: createId(),
+            hopsRemaining: GOSSIP_HOP_LIMIT,
+            senderId: config.player.id,
+            sessionId: config.player.sessionId,
+            targetPlayerId: envelope.senderId,
+            intentId: envelope.id,
+            accepted,
+            revision: previousResult?.revision ?? next.revision,
+            sentAt: Date.now(),
+          })
+        }
       }
     },
-    [config.player.id, originate, publishState],
+    [config, originate, publishState],
   )
 
   useEffect(() => {
@@ -352,35 +466,41 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
     const handleJoin = (
       player: RoomSessionConfig['player'],
-      peerId: string,
       requestSnapshot: boolean,
     ) => {
-      peerPlayerRef.current.set(peerId, player.id)
-      playerLastSeenRef.current.set(player.id, Date.now())
+      if (!isValidPlayerSession(player)) return
       const current = stateRef.current
-      if (!current || current.adminId !== config.player.id) return
-      const known = current.players[player.id]
+      if (!current || !isLocalCreatorAuthority(current, config)) return
       if (
-        known?.sessionId === player.sessionId &&
-        known.connected &&
-        known.name === player.name
+        player.id === current.creatorId &&
+        player.sessionId !== config.player.sessionId
       ) {
         if (requestSnapshot) sendSnapshot(current, 'join')
         return
       }
-      const next = joinPlayer(current, player)
+      const known = current.players[player.id]
+      if (known?.sessionId === player.sessionId) {
+        playerLastSeenRef.current.set(player.id, Date.now())
+        const next = setPlayerConnected(current, player.id, true)
+        if (next !== current) publishState(next)
+        else if (requestSnapshot) sendSnapshot(current, 'join')
+        return
+      }
+      if (known && !requestSnapshot) return
+      const next = known
+        ? reclaimPlayerSession(current, player)
+        : joinPlayer(current, player)
       if (next === current) {
         if (requestSnapshot) sendSnapshot(current, 'join')
       } else {
+        playerLastSeenRef.current.set(player.id, Date.now())
         publishState(next)
       }
     }
 
-    const unsubscribeMessages = transport.subscribe((message, peerId) => {
-      if (disposed || !message || typeof message !== 'object') return
+    const unsubscribeMessages = transport.subscribe((message) => {
+      if (disposed || !isValidWireMessage(message)) return
       if (
-        typeof message.messageId !== 'string' ||
-        typeof message.hopsRemaining !== 'number' ||
         seenMessageIdsRef.current.has(message.messageId)
       ) {
         return
@@ -389,22 +509,24 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
       if (message.type === 'join' || message.type === 'presence') {
         relay(message)
-        handleJoin(message.player, peerId, message.type === 'join')
+        handleJoin(message.player, message.type === 'join')
         return
       }
 
       if (message.type === 'heartbeat') {
         const current = stateRef.current
-        if (message.senderId !== message.adminId) return
+        if (message.senderId !== message.creatorId) return
         relay(message)
+        if (!current) {
+          creatorLastSeenRef.current = Date.now()
+          return
+        }
         if (
-          current &&
-          message.adminId === current.adminId &&
-          message.senderId === current.adminId &&
-          message.sessionId === current.players[current.adminId]?.sessionId &&
-          message.adminEpoch >= current.adminEpoch
+          message.creatorId === current.creatorId &&
+          message.sessionId === current.players[current.creatorId]?.sessionId
         ) {
-          adminLastSeenRef.current = Date.now()
+          creatorLastSeenRef.current = Date.now()
+          setCreatorConnected(true)
           const sample = message.sentAt - Date.now()
           clockOffsetRef.current =
             clockOffsetRef.current * 0.7 + sample * 0.3
@@ -427,25 +549,62 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         return
       }
 
+      if (message.type === 'intent-ack') {
+        relay(message)
+        const current = stateRef.current
+        if (
+          current &&
+          message.senderId === current.creatorId &&
+          message.sessionId === current.players[current.creatorId]?.sessionId &&
+          message.targetPlayerId === config.player.id
+        ) {
+          pendingIntentsRef.current.delete(message.intentId)
+          if (!message.accepted) {
+            setConnection((currentConnection) => ({
+              ...currentConnection,
+              error:
+                'The creator rejected an outdated or oversized update. Current state was requested.',
+            }))
+            sendSyncRequest('cursor-ahead')
+          }
+        }
+        return
+      }
+
       if (message.type === 'sync-request') {
         if (message.roomCode !== config.roomCode) return
         relay(message)
         const current = stateRef.current
         const player = current?.players[message.senderId]
         if (
-          current?.adminId === config.player.id &&
+          current &&
+          isLocalCreatorAuthority(current, config) &&
           message.cursor &&
           player?.sessionId === message.sessionId
         ) {
-          recordSyncReport(message.senderId, message.cursor, Date.now())
+          recordSyncReport(
+            message.senderId,
+            message.sessionId,
+            message.cursor,
+            Date.now(),
+          )
         }
-        if (current?.adminId === config.player.id) {
+        if (current && isLocalCreatorAuthority(current, config)) {
+          if (
+            message.cursor &&
+            message.cursor.creatorSessionId ===
+              current.players[current.creatorId].sessionId &&
+            message.cursor.revision === current.revision
+          ) {
+            return
+          }
           sendSnapshot(current, 'sync-response')
           return
         }
         const cached = latestAuthoritativeSnapshotRef.current
         if (
           cached &&
+          message.senderId === cached.state.creatorId &&
           (!message.cursor ||
             isSyncCursorAhead(
               syncCursorForState(cached.state),
@@ -468,19 +627,25 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         relay(message)
         const current = stateRef.current
         if (
-          current?.adminId === config.player.id &&
+          current &&
+          isLocalCreatorAuthority(current, config) &&
           current.players[message.senderId]?.sessionId === message.sessionId
         ) {
-          recordSyncReport(message.senderId, message.cursor, Date.now())
+          recordSyncReport(
+            message.senderId,
+            message.sessionId,
+            message.cursor,
+            Date.now(),
+          )
         }
         return
       }
 
       if (message.type === 'snapshot') {
         if (
-          message.state.protocolVersion !== 1 ||
+          ![1, 2].includes(Number(message.state.protocolVersion)) ||
           message.state.roomCode !== config.roomCode ||
-          !isAdminAuthoritativeSnapshot(
+          !isCreatorAuthoritativeSnapshot(
             message.state,
             message.senderId,
             message.sessionId,
@@ -496,59 +661,94 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
           ? adoptAuthoritativeSnapshot(cached.state, incoming)
           : incoming
         if (
-          cachedWinner.adminId === incoming.adminId &&
-          cachedWinner.adminEpoch === incoming.adminEpoch &&
+          cachedWinner.creatorId === incoming.creatorId &&
+          cachedWinner.players[cachedWinner.creatorId]?.sessionId ===
+            incoming.players[incoming.creatorId]?.sessionId &&
           cachedWinner.revision === incoming.revision
         ) {
           latestAuthoritativeSnapshotRef.current = message
         }
         const next = adoptAuthoritativeSnapshot(previous, incoming)
         if (
-          next.adminId === incoming.adminId &&
-          next.adminEpoch === incoming.adminEpoch
+          config.player.id === incoming.creatorId &&
+          incoming.players[incoming.creatorId]?.sessionId !==
+            config.player.sessionId
         ) {
-          adminLastSeenRef.current = Date.now()
+          publishState(next, false)
+          recoveryCandidatesRef.current.push(incoming)
+          if (
+            previous?.creatorId === incoming.creatorId &&
+            previous.players[previous.creatorId]?.sessionId !==
+              config.player.sessionId
+          ) {
+            recoveryCandidatesRef.current.push(previous)
+          }
+          if (recoveryTimerRef.current === null) {
+            const remainingHeartbeat = Math.max(
+              0,
+              HEARTBEAT_TIMEOUT_MS -
+                (Date.now() - creatorLastSeenRef.current),
+            )
+            recoveryTimerRef.current = window.setTimeout(() => {
+              recoveryTimerRef.current = null
+              if (
+                Date.now() - creatorLastSeenRef.current <
+                HEARTBEAT_TIMEOUT_MS
+              ) {
+                recoveryCandidatesRef.current = []
+                return
+              }
+              const best = recoveryCandidatesRef.current.sort((left, right) => {
+                const leftCreator = left.players[left.creatorId]
+                const rightCreator = right.players[right.creatorId]
+                return (
+                  rightCreator.sessionStartedAt -
+                    leftCreator.sessionStartedAt ||
+                  rightCreator.sessionId.localeCompare(leftCreator.sessionId) ||
+                  right.revision - left.revision
+                )
+              })[0]
+              recoveryCandidatesRef.current = []
+              if (!best) return
+              const recovered = reclaimCreatorSession(best, config.player)
+              creatorLastSeenRef.current = Date.now()
+              setCreatorConnected(true)
+              publishState(recovered)
+            }, remainingHeartbeat + 1_200)
+          }
+          return
+        }
+        if (
+          next.creatorId === incoming.creatorId &&
+          next.players[next.creatorId]?.sessionId ===
+            incoming.players[incoming.creatorId]?.sessionId &&
+          next.revision === incoming.revision
+        ) {
+          creatorLastSeenRef.current = Date.now()
+          setCreatorConnected(true)
           const sample = message.sentAt - Date.now()
           clockOffsetRef.current =
             clockOffsetRef.current * 0.7 + sample * 0.3
           setClockOffsetMs(clockOffsetRef.current)
         }
-        publishState(next, false)
-        sendSyncReport(next)
         if (
           previous &&
-          next.adminEpoch > previous.adminEpoch &&
-          next.adminId !== config.player.id &&
-          next.phase === 'stage' &&
-          next.round
+          previous.players[previous.creatorId]?.sessionId !==
+            next.players[next.creatorId]?.sessionId
         ) {
-          const assignment = next.round.assignments[config.player.id]
-          for (const [type, candidate] of [
-            ['draft', assignment?.draft],
-            ['submit', assignment?.submission],
-          ] as const) {
-            if (!candidate || candidate.sessionId !== config.player.sessionId) {
-              continue
-            }
-            const envelope: IntentEnvelope = {
-              id: createId(),
-              senderId: config.player.id,
-              sessionId: config.player.sessionId,
-              intent: {
-                type,
-                roundId: next.round.id,
-                stageIndex: next.round.stageIndex,
-                candidate,
-              },
-            }
-            originate({
-              type: 'intent',
-              messageId: envelope.id,
-              hopsRemaining: GOSSIP_HOP_LIMIT,
-              envelope,
-            })
+          for (const pending of pendingIntentsRef.current.values()) {
+            pending.attempts = 0
+            pending.nextRetryAt = 0
           }
         }
+        publishState(next, false)
+        setConnection((currentConnection) => ({
+          ...currentConnection,
+          error: currentConnection.error?.startsWith('The creator rejected')
+            ? null
+            : currentConnection.error,
+        }))
+        sendSyncReport(next)
       }
     })
 
@@ -568,7 +768,10 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     }
 
     sendPresence()
-    if (stateRef.current?.adminId === config.player.id) {
+    if (
+      stateRef.current &&
+      isLocalCreatorAuthority(stateRef.current, config)
+    ) {
       sendSnapshot(stateRef.current, 'push')
     } else {
       sendSyncRequest('join')
@@ -580,6 +783,22 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       const current = stateRef.current
       if (current) sendSyncReport(current)
     }, SYNC_INTERVAL_MS)
+    const retryTimer = window.setInterval(() => {
+      const now = Date.now()
+      for (const pending of pendingIntentsRef.current.values()) {
+        if (pending.nextRetryAt > now) continue
+        originate({
+          type: 'intent',
+          messageId: createId(),
+          hopsRemaining: GOSSIP_HOP_LIMIT,
+          envelope: pending.envelope,
+        })
+        pending.attempts += 1
+        const backoff = Math.min(15_000, 1_000 * 2 ** pending.attempts)
+        pending.nextRetryAt =
+          now + backoff + Math.floor(Math.random() * Math.min(500, backoff / 4))
+      }
+    }, 500)
     const coordinatorTimer = window.setInterval(() => {
       const now = Date.now()
       if (
@@ -601,10 +820,11 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
       const current = stateRef.current
       if (!current) return
-      const isAdmin = current.adminId === config.player.id
+      const isCreator = isLocalCreatorAuthority(current, config)
 
-      if (isAdmin) {
-        adminLastSeenRef.current = now
+      if (isCreator) {
+        creatorLastSeenRef.current = now
+        setCreatorConnected(true)
         if (clockOffsetRef.current !== 0) {
           clockOffsetRef.current = 0
           setClockOffsetMs(0)
@@ -617,10 +837,9 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
             type: 'heartbeat',
             messageId: createId(),
             hopsRemaining: GOSSIP_HOP_LIMIT,
-            adminId: current.adminId,
+            creatorId: current.creatorId,
             senderId: config.player.id,
             sessionId: config.player.sessionId,
-            adminEpoch: current.adminEpoch,
             revision: current.revision,
             cursor: syncCursorForState(current),
             sentAt: now,
@@ -661,32 +880,21 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         return
       }
 
-      if (now - adminLastSeenRef.current < HEARTBEAT_TIMEOUT_MS) return
-
-      const connected = new Set<string>([config.player.id])
-      for (const [playerId, lastSeen] of playerLastSeenRef.current) {
-        if (now - lastSeen < HEARTBEAT_TIMEOUT_MS) connected.add(playerId)
+      if (now - creatorLastSeenRef.current >= HEARTBEAT_TIMEOUT_MS) {
+        setCreatorConnected(false)
       }
-      const candidate = nextAdminCandidate(current, connected)
-      if (candidate !== config.player.id) return
-
-      const elected = electAdmin(
-        current,
-        candidate,
-        now,
-        clockOffsetRef.current,
-      )
-      clockOffsetRef.current = 0
-      setClockOffsetMs(0)
-      adminLastSeenRef.current = now
-      publishState(elected)
     }, 250)
 
     return () => {
       disposed = true
       window.clearInterval(presenceTimer)
       window.clearInterval(syncTimer)
+      window.clearInterval(retryTimer)
       window.clearInterval(coordinatorTimer)
+      if (recoveryTimerRef.current !== null) {
+        window.clearTimeout(recoveryTimerRef.current)
+        recoveryTimerRef.current = null
+      }
       unsubscribeMessages()
       unsubscribePeers()
       if (transportRef.current === transport) transportRef.current = null
@@ -837,6 +1045,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     state,
     connection: effectiveConnection,
     clockOffsetMs,
+    creatorConnected,
     syncReports,
     sendDraft: (content) => sendCandidate('draft', content),
     submit: (content) => sendCandidate('submit', content),

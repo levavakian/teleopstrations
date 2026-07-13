@@ -128,9 +128,82 @@ test.beforeEach(async ({context}) => {
   await installFaultInjectingTransport(context)
 })
 
-test('recovers from dropped direct admin snapshots and reports sync', async ({
+test('creator monitor distinguishes same page from exact revision', async ({
   context,
 }) => {
+  const {host} = await createTrio(context)
+  await host.getByRole('button', {name: /shuffle & start round/i}).click()
+  await expect(host.locator('.sync-status')).toContainText('2/2 on this page')
+
+  await host
+    .getByLabel(/Start this playbook/)
+    .fill('Creator draft changes canonical revision')
+  await expect(host.locator('.sync-status')).toContainText('2/2 on this page')
+  await expect(host.locator('.sync-status')).toContainText(
+    'Same page · state update pending',
+  )
+
+  await expect(host.locator('.sync-status li.is-synced')).toHaveCount(2, {
+    timeout: 7_000,
+  })
+})
+
+test('creator monitor shows a stale client recover to the current page', async ({
+  context,
+}, testInfo) => {
+  const {host, bee, cee} = await createTrio(context)
+  await cee.evaluate(() => {
+    ;(
+      globalThis as typeof globalThis & {
+        networkTestControls?: NetworkTestControls
+      }
+    ).networkTestControls = {
+      blockedSnapshotPeers: ['host', 'bee'],
+    }
+  })
+
+  await host.getByRole('button', {name: /shuffle & start round/i}).click()
+  await expect(
+    bee.getByRole('heading', {name: 'Write a secret prompt'}),
+  ).toBeVisible()
+  await expect(
+    cee.getByRole('heading', {name: 'Gather the storytellers'}),
+  ).toBeVisible()
+  await expect(host.locator('.sync-status')).toContainText('1/2 on this page')
+  await expect(
+    host.locator('.sync-status li').filter({hasText: 'Guest C'}),
+  ).not.toHaveClass(/is-synced/)
+  if (process.env.RECORD_DEMO === '1') {
+    await host.locator('.sync-status').scrollIntoViewIfNeeded()
+    await host.waitForTimeout(2_000)
+  }
+
+  await cee.evaluate(() => {
+    ;(
+      globalThis as typeof globalThis & {
+        networkTestControls?: NetworkTestControls
+      }
+    ).networkTestControls = {}
+  })
+
+  await expect(
+    cee.getByRole('heading', {name: 'Write a secret prompt'}),
+  ).toBeVisible({timeout: 10_000})
+  await expect(host.locator('.sync-status')).toContainText('2/2 on this page')
+  await expect(host.locator('.sync-status li.is-synced')).toHaveCount(2)
+  if (process.env.RECORD_DEMO === '1') {
+    await host.locator('.sync-status').scrollIntoViewIfNeeded()
+    await host.waitForTimeout(2_000)
+    await host.screenshot({
+      path: testInfo.outputPath('sync-recovered.png'),
+      fullPage: true,
+    })
+  }
+})
+
+test('recovers from dropped direct creator snapshots and reports sync', async ({
+  context,
+}, testInfo) => {
   const {host, bee, cee} = await createTrio(context)
   await cee.evaluate(() => {
     ;(
@@ -161,11 +234,18 @@ test('recovers from dropped direct admin snapshots and reports sync', async ({
   await expect(cee.locator('.paper-number')).toContainText('2of 2')
 
   await expect(host.locator('.sync-status')).toContainText('2/2 on this page')
-  await host.locator('.sync-status summary').click()
   await expect(host.locator('.sync-status')).toContainText(
     'Last update: Playbook 1, page 2',
   )
   await expect(host.locator('.sync-status li.is-synced')).toHaveCount(2)
+  if (process.env.RECORD_DEMO === '1') {
+    await host.locator('.sync-status').scrollIntoViewIfNeeded()
+    await host.waitForTimeout(2_000)
+    await host.screenshot({
+      path: testInfo.outputPath('sync-monitor.png'),
+      fullPage: true,
+    })
+  }
 
   await cee.waitForFunction(
     () =>
@@ -182,7 +262,7 @@ test('recovers from dropped direct admin snapshots and reports sync', async ({
   ).toBeVisible()
 })
 
-test('gossips authoritative state across a line topology without an admin edge', async ({
+test('gossips authoritative state across a line topology without a creator edge', async ({
   context,
 }) => {
   const {host, bee, cee} = await createTrio(context)
@@ -209,10 +289,18 @@ test('gossips authoritative state across a line topology without an admin edge',
     cee.getByRole('heading', {name: 'Write a secret prompt'}),
   ).toBeVisible()
 
+  host.once('dialog', (dialog) => dialog.accept())
+  await host.getByRole('button', {name: 'Next stage'}).click()
+  await expect(
+    cee.getByRole('heading', {name: 'Draw what you read'}),
+  ).toBeVisible()
+
+  host.once('dialog', (dialog) => dialog.accept())
+  await host.getByRole('button', {name: 'End round'}).click()
+  await expect(cee.getByText('The grand reveal', {exact: false})).toBeVisible()
+
   await cee.waitForTimeout(7_000)
   await expect(host.locator('.connection-pill')).toContainText('2 online')
   await expect(cee.locator('.connection-pill')).toContainText('2 online')
-  await expect(
-    cee.getByRole('heading', {name: 'Write a secret prompt'}),
-  ).toBeVisible()
+  await expect(cee.getByText('The grand reveal', {exact: false})).toBeVisible()
 })

@@ -5,15 +5,12 @@ import {
   advanceStage,
   applyIntent,
   createInitialRoom,
-  electAdmin,
   getAssignment,
-  isAdminAuthoritativeSnapshot,
+  isCreatorAuthoritativeSnapshot,
   isSyncCursorAhead,
   joinPlayer,
-  mergeReplica,
-  nextAdminCandidate,
   playerIdForName,
-  setPlayerConnected,
+  reclaimCreatorSession,
   startRound,
   syncCursorForState,
 } from '../src/game'
@@ -323,26 +320,65 @@ describe('book rotation and finalization', () => {
   })
 })
 
-describe('replication and administration', () => {
-  it('accepts snapshots only when authored by their declared admin session', () => {
+describe('creator authority', () => {
+  it('rejects creator controls from non-creator players', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const attempted = applyIntent(
+      state,
+      envelope(sessions[1], {
+        type: 'start-round',
+        expectedPhase: 'lobby',
+        previousRoundId: null,
+      }),
+      10_000,
+    )
+    expect(attempted).toBe(state)
+  })
+
+  it('fences the previous creator session when recovery resumes', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const recovered = reclaimCreatorSession(state, {
+      ...sessions[0],
+      sessionId: 'creator-recovered',
+      sessionStartedAt: 2_000,
+    })
+
+    expect(recovered.creatorId).toBe(sessions[0].id)
+    expect(recovered.players[recovered.creatorId].sessionId).toBe(
+      'creator-recovered',
+    )
+    expect(
+      isCreatorAuthoritativeSnapshot(
+        recovered,
+        recovered.creatorId,
+        sessions[0].sessionId,
+      ),
+    ).toBe(false)
+  })
+
+  it('accepts snapshots only when authored by the creator session', () => {
     const {state, sessions} = roomWithPlayers(3)
 
     expect(
-      isAdminAuthoritativeSnapshot(
+      isCreatorAuthoritativeSnapshot(
         state,
-        state.adminId,
+        state.creatorId,
         sessions[0].sessionId,
       ),
     ).toBe(true)
     expect(
-      isAdminAuthoritativeSnapshot(
+      isCreatorAuthoritativeSnapshot(
         state,
         sessions[1].id,
         sessions[1].sessionId,
       ),
     ).toBe(false)
     expect(
-      isAdminAuthoritativeSnapshot(state, state.adminId, 'stale-session'),
+      isCreatorAuthoritativeSnapshot(
+        state,
+        state.creatorId,
+        'stale-session',
+      ),
     ).toBe(false)
   })
 
@@ -358,49 +394,19 @@ describe('replication and administration', () => {
         syncCursorForState(stageZero),
       ),
     ).toBe(true)
-    expect(mergeReplica(stageZero, stageOne).round?.stageIndex).toBe(1)
+    expect(
+      adoptAuthoritativeSnapshot(stageZero, stageOne).round?.stageIndex,
+    ).toBe(1)
     expect(
       isSyncCursorAhead(
         syncCursorForState(reveal),
         syncCursorForState(stageOne),
       ),
     ).toBe(true)
-    expect(mergeReplica(stageOne, reveal).phase).toBe('reveal')
+    expect(adoptAuthoritativeSnapshot(stageOne, reveal).phase).toBe('reveal')
   })
 
-  it('elects the next connected player in frozen round order', () => {
-    const {state, sessions} = roomWithPlayers(4)
-    let started = startRound(state, 10_000, () => 0.999)
-    started = setPlayerConnected(started, sessions[1].id, false)
-    const candidate = nextAdminCandidate(
-      started,
-      new Set([sessions[2].id, sessions[3].id]),
-    )
-
-    expect(candidate).toBe(sessions[2].id)
-    const elected = electAdmin(started, candidate!)
-    expect(elected.adminId).toBe(sessions[2].id)
-    expect(elected.adminEpoch).toBe(1)
-  })
-
-  it('merges a newer backed-up draft into an authoritative snapshot', () => {
-    const {state, sessions} = roomWithPlayers(3)
-    const authoritative = startRound(state, 10_000, () => 0.999)
-    const local = structuredClone(authoritative)
-    const assignment = getAssignment(local, sessions[1].id)!
-    assignment.draft = candidate(sessions[1], 9, {
-      kind: 'text',
-      text: 'Replicated backup',
-    })
-
-    const merged = mergeReplica(local, authoritative)
-    expect(getAssignment(merged, sessions[1].id)?.draft?.content).toEqual({
-      kind: 'text',
-      text: 'Replicated backup',
-    })
-  })
-
-  it('adopts the admin snapshot exactly without merging client-only state', () => {
+  it('adopts the creator snapshot exactly without client-only state', () => {
     const {state, sessions} = roomWithPlayers(3)
     const authoritative = startRound(state, 10_000, () => 0.999)
     const local = structuredClone(authoritative)
@@ -415,14 +421,23 @@ describe('replication and administration', () => {
     expect(adopted).not.toBe(authoritative)
   })
 
-  it('resolves competing admin elections by closest round successor', () => {
-    const {state, sessions} = roomWithPlayers(4)
+  it('rejects oversized client content', () => {
+    const {state, sessions} = roomWithPlayers(3)
     const started = startRound(state, 10_000, () => 0.999)
-    const immediate = electAdmin(started, sessions[1].id, 11_000)
-    const later = electAdmin(started, sessions[2].id, 11_000)
-
-    expect(mergeReplica(later, immediate).adminId).toBe(sessions[1].id)
-    expect(mergeReplica(immediate, later).adminId).toBe(sessions[1].id)
+    const attempted = applyIntent(
+      started,
+      envelope(sessions[0], {
+        type: 'submit',
+        roundId: started.round!.id,
+        stageIndex: 0,
+        candidate: candidate(sessions[0], 1, {
+          kind: 'text',
+          text: 'x'.repeat(281),
+        }),
+      }),
+      11_000,
+    )
+    expect(attempted).toBe(started)
   })
 
   it('rejects a duplicate force-advance after its stage has changed', () => {

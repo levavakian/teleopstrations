@@ -21,6 +21,8 @@ export const DEFAULT_SETTINGS: GameSettings = {
 }
 
 export const MIN_PLAYERS = 3
+export const MAX_ROOM_STATE_CHARS = 3_500_000
+export const MAX_TIMER_SECONDS = 8_000_000_000_000
 
 export function normalizeName(name: string): string {
   return name.normalize('NFKC').trim().replace(/\s+/g, ' ')
@@ -53,31 +55,30 @@ export function createId(): string {
 
 export function isValidSettings(settings: GameSettings): boolean {
   return (
-    Number.isInteger(settings.promptSeconds) &&
+    Number.isSafeInteger(settings.promptSeconds) &&
     settings.promptSeconds > 0 &&
-    Number.isInteger(settings.drawingSeconds) &&
-    settings.drawingSeconds > 0
+    settings.promptSeconds <= MAX_TIMER_SECONDS &&
+    Number.isSafeInteger(settings.drawingSeconds) &&
+    settings.drawingSeconds > 0 &&
+    settings.drawingSeconds <= MAX_TIMER_SECONDS
   )
 }
 
 export function hydrateRoomState(state: RoomState): RoomState {
-  if (
-    Array.isArray(state.blockedPlayerIds) &&
-    (state.closedAt === null || typeof state.closedAt === 'number')
-  ) {
-    return state
-  }
   return {
     ...state,
+    protocolVersion: 2,
     blockedPlayerIds: state.blockedPlayerIds ?? [],
     closedAt: state.closedAt ?? null,
   }
 }
 
 export function syncCursorForState(state: RoomState): SyncCursor {
+  const creator = state.players[state.creatorId]
   return {
-    adminId: state.adminId,
-    adminEpoch: state.adminEpoch,
+    creatorId: state.creatorId,
+    creatorSessionId: creator.sessionId,
+    creatorSessionStartedAt: creator.sessionStartedAt,
     revision: state.revision,
     phase: state.phase,
     roundId: state.round?.id ?? null,
@@ -85,6 +86,7 @@ export function syncCursorForState(state: RoomState): SyncCursor {
     stageIndex: state.round?.stageIndex ?? null,
     revealBookIndex: state.round?.reveal?.bookIndex ?? null,
     revealPageIndex: state.round?.reveal?.pageIndex ?? null,
+    revealComplete: state.round?.reveal?.complete ?? null,
   }
 }
 
@@ -92,10 +94,13 @@ export function isSyncCursorAhead(
   remote: SyncCursor,
   local: SyncCursor,
 ): boolean {
-  if (remote.adminEpoch !== local.adminEpoch) {
-    return remote.adminEpoch > local.adminEpoch
+  if (remote.creatorId !== local.creatorId) return true
+  if (remote.creatorSessionStartedAt !== local.creatorSessionStartedAt) {
+    return remote.creatorSessionStartedAt > local.creatorSessionStartedAt
   }
-  if (remote.adminId !== local.adminId) return true
+  if (remote.creatorSessionId !== local.creatorSessionId) {
+    return remote.creatorSessionId > local.creatorSessionId
+  }
   if (remote.revision !== local.revision) return remote.revision > local.revision
   if (
     remote.roundNumber !== local.roundNumber &&
@@ -124,17 +129,17 @@ export function isSyncCursorAhead(
     remote.revealPageIndex !== null &&
     local.revealPageIndex !== null &&
     remote.revealPageIndex > local.revealPageIndex
-  )
+  ) || (remote.revealComplete === true && local.revealComplete === false)
 }
 
-export function isAdminAuthoritativeSnapshot(
+export function isCreatorAuthoritativeSnapshot(
   state: RoomState,
   senderId: PlayerId,
   sessionId: string,
 ): boolean {
   return (
-    senderId === state.adminId &&
-    sessionId === state.players[state.adminId]?.sessionId
+    senderId === state.creatorId &&
+    sessionId === state.players[state.creatorId]?.sessionId
   )
 }
 
@@ -201,12 +206,9 @@ export function createInitialRoom(
   }
 
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     roomCode: normalizeRoomCode(roomCode),
     creatorId: creator.id,
-    adminId: creator.id,
-    adminPredecessorId: null,
-    adminEpoch: 0,
     revision: 0,
     settings,
     players: {[creator.id]: player},
@@ -271,6 +273,58 @@ export function joinPlayer(
   return next
 }
 
+export function reclaimCreatorSession(
+  state: RoomState,
+  session: PlayerSession,
+  now: number = Date.now(),
+): RoomState {
+  if (session.id !== state.creatorId) return state
+  const next = copyState(state)
+  const creator = next.players[state.creatorId]
+  creator.name = session.name
+  creator.sessionId = session.sessionId
+  creator.sessionStartedAt = Math.max(
+    session.sessionStartedAt,
+    creator.sessionStartedAt + 1,
+  )
+  creator.connected = true
+  if (next.phase === 'stage' && next.round) {
+    next.round.deadline = Math.max(next.round.deadline, now + 20_000)
+  }
+  next.revision += 1
+  return next
+}
+
+export function reclaimPlayerSession(
+  state: RoomState,
+  session: PlayerSession,
+): RoomState {
+  if (session.id === state.creatorId || !state.players[session.id]) return state
+  const next = copyState(state)
+  const player = next.players[session.id]
+  player.name = session.name
+  player.sessionId = session.sessionId
+  player.sessionStartedAt += 1
+  player.connected = true
+  const assignment = next.round?.assignments[session.id]
+  if (assignment?.draft) {
+    assignment.draft = {
+      ...assignment.draft,
+      seq: 0,
+      sessionId: session.sessionId,
+    }
+  }
+  if (assignment?.submission) {
+    assignment.submission = {
+      ...assignment.submission,
+      seq: 0,
+      sessionId: session.sessionId,
+    }
+  }
+  next.revision += 1
+  return next
+}
+
 export function setPlayerConnected(
   state: RoomState,
   playerId: PlayerId,
@@ -329,11 +383,48 @@ function sameCandidateSession(
   return state.players[playerId]?.sessionId === candidate.sessionId
 }
 
+function isValidContent(content: Content): boolean {
+  if (content.kind === 'text') return content.text.length <= 280
+  if (content.strokes.length > 1_000) return false
+  let pointCount = 0
+  for (const stroke of content.strokes) {
+    if (
+      stroke.id.length > 128 ||
+      !Number.isInteger(stroke.color) ||
+      stroke.color < 0 ||
+      stroke.color >= 16 ||
+      !Number.isInteger(stroke.size) ||
+      stroke.size < 0 ||
+      stroke.size >= 8 ||
+      stroke.points.length > 5_000
+    ) {
+      return false
+    }
+    pointCount += stroke.points.length
+    if (pointCount > 50_000) return false
+    for (const point of stroke.points) {
+      if (
+        !Number.isFinite(point.x) ||
+        !Number.isFinite(point.y) ||
+        !Number.isFinite(point.pressure) ||
+        point.x < 0 ||
+        point.x > 1 ||
+        point.y < 0 ||
+        point.y > 1 ||
+        point.pressure < 0 ||
+        point.pressure > 1
+      ) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
 function applyCandidate(
   state: RoomState,
   envelope: IntentEnvelope,
   kind: 'draft' | 'submit',
-  authoritative: boolean,
 ): RoomState {
   const round = state.round
   const intent = envelope.intent
@@ -344,7 +435,8 @@ function applyCandidate(
     intent.roundId !== round.id ||
     intent.stageIndex !== round.stageIndex ||
     envelope.sessionId !== intent.candidate.sessionId ||
-    !sameCandidateSession(state, envelope.senderId, intent.candidate)
+    !sameCandidateSession(state, envelope.senderId, intent.candidate) ||
+    !isValidContent(intent.candidate.content)
   ) {
     return state
   }
@@ -370,12 +462,17 @@ function applyCandidate(
 
   const next = copyState(state)
   next.round!.assignments[envelope.senderId][field] = intent.candidate
-  if (authoritative) next.revision += 1
+  try {
+    if (JSON.stringify(next).length > MAX_ROOM_STATE_CHARS) return state
+  } catch {
+    return state
+  }
+  next.revision += 1
   return next
 }
 
-function isAdminControl(state: RoomState, senderId: PlayerId): boolean {
-  return senderId === state.adminId || senderId === state.creatorId
+function isCreatorControl(state: RoomState, senderId: PlayerId): boolean {
+  return senderId === state.creatorId
 }
 
 function currentRevealOwner(state: RoomState): PlayerId | null {
@@ -401,11 +498,11 @@ export function applyIntent(
 
   const intent = envelope.intent
   if (intent.type === 'draft' || intent.type === 'submit') {
-    return applyCandidate(state, envelope, intent.type, true)
+    return applyCandidate(state, envelope, intent.type)
   }
 
   if (intent.type === 'close-room') {
-    return isAdminControl(state, envelope.senderId) &&
+    return isCreatorControl(state, envelope.senderId) &&
       intent.roomCode === state.roomCode
       ? closeRoom(state, now)
       : state
@@ -416,7 +513,7 @@ export function applyIntent(
       state.phase === 'lobby' ||
       (state.phase === 'reveal' && Boolean(state.round?.reveal?.complete))
     if (
-      !isAdminControl(state, envelope.senderId) ||
+      !isCreatorControl(state, envelope.senderId) ||
       !betweenRounds ||
       !isValidSettings(intent.settings)
     ) {
@@ -437,13 +534,13 @@ export function applyIntent(
         state.round?.reveal?.complete &&
         intent.expectedPhase === 'reveal' &&
         intent.previousRoundId === state.round.id)
-    return isAdminControl(state, envelope.senderId) && validPhase
+    return isCreatorControl(state, envelope.senderId) && validPhase
       ? startRound(state, now, random)
       : state
   }
 
   if (intent.type === 'force-advance') {
-    return isAdminControl(state, envelope.senderId) &&
+    return isCreatorControl(state, envelope.senderId) &&
       state.phase === 'stage' &&
       state.round?.id === intent.roundId &&
       state.round.stageIndex === intent.stageIndex
@@ -452,7 +549,7 @@ export function applyIntent(
   }
 
   if (intent.type === 'end-round') {
-    return isAdminControl(state, envelope.senderId) &&
+    return isCreatorControl(state, envelope.senderId) &&
       state.phase === 'stage' &&
       state.round?.id === intent.roundId &&
       state.round.stageIndex === intent.stageIndex
@@ -469,14 +566,14 @@ export function applyIntent(
         state.round?.reveal?.complete &&
         intent.expectedPhase === 'reveal' &&
         intent.previousRoundId === state.round.id)
-    return isAdminControl(state, envelope.senderId) && validPhase
+    return isCreatorControl(state, envelope.senderId) && validPhase
       ? kickPlayer(state, intent.playerId)
       : state
   }
 
   if (intent.type === 'reset-lobby') {
     if (
-      !isAdminControl(state, envelope.senderId) ||
+      !isCreatorControl(state, envelope.senderId) ||
       !state.round ||
       intent.roundId !== state.round.id
     ) {
@@ -539,19 +636,6 @@ export function applyIntent(
     return next
   }
 
-  return state
-}
-
-export function applyBackupIntent(
-  state: RoomState,
-  envelope: IntentEnvelope,
-): RoomState {
-  if (envelope.intent.type === 'draft') {
-    return applyCandidate(state, envelope, 'draft', false)
-  }
-  if (envelope.intent.type === 'submit') {
-    return applyCandidate(state, envelope, 'submit', false)
-  }
   return state
 }
 
@@ -683,7 +767,6 @@ export function kickPlayer(
   if (
     !betweenRounds ||
     !state.players[playerId] ||
-    playerId === state.adminId ||
     playerId === state.creatorId
   ) {
     return state
@@ -709,77 +792,6 @@ export function closeRoom(state: RoomState, now: number): RoomState {
   return next
 }
 
-function mergeCandidate(
-  state: RoomState,
-  incoming: Candidate | null,
-  local: Candidate | null,
-  playerId: PlayerId,
-): Candidate | null {
-  const currentSession = state.players[playerId]?.sessionId
-  const valid = [incoming, local].filter(
-    (candidate): candidate is Candidate =>
-      Boolean(candidate && candidate.sessionId === currentSession),
-  )
-  return valid.sort((left, right) => right.seq - left.seq)[0] ?? null
-}
-
-export function mergeReplica(
-  local: RoomState | null,
-  incoming: RoomState,
-): RoomState {
-  if (!local || local.roomCode !== incoming.roomCode) return incoming
-
-  const electionDistance = (state: RoomState): number => {
-    const ring =
-      state.round && state.phase !== 'lobby'
-        ? state.round.order
-        : state.joinOrder
-    const predecessorIndex = ring.indexOf(state.adminPredecessorId ?? '')
-    const adminIndex = ring.indexOf(state.adminId)
-    if (predecessorIndex < 0 || adminIndex < 0) return Number.MAX_SAFE_INTEGER
-    return (adminIndex - predecessorIndex + ring.length) % ring.length
-  }
-
-  const incomingElectionWins =
-    electionDistance(incoming) < electionDistance(local) ||
-    (electionDistance(incoming) === electionDistance(local) &&
-      incoming.adminId < local.adminId)
-  const incomingWins =
-    incoming.adminEpoch > local.adminEpoch ||
-    (incoming.adminEpoch === local.adminEpoch &&
-      (incoming.adminId === local.adminId
-        ? incoming.revision >= local.revision
-        : incomingElectionWins))
-  const base = copyState(incomingWins ? incoming : local)
-  const other = incomingWins ? local : incoming
-
-  const baseRound = base.round
-  const otherRound = other.round
-  if (
-    base.phase === 'stage' &&
-    other.phase === 'stage' &&
-    baseRound &&
-    otherRound &&
-    baseRound.id === otherRound.id &&
-    baseRound.stageIndex === otherRound.stageIndex
-  ) {
-    for (const playerId of baseRound.order) {
-      const target = baseRound.assignments[playerId]
-      const source = otherRound.assignments[playerId]
-      if (!target || !source) continue
-      target.draft = mergeCandidate(base, target.draft, source.draft, playerId)
-      target.submission = mergeCandidate(
-        base,
-        target.submission,
-        source.submission,
-        playerId,
-      )
-    }
-  }
-
-  return base
-}
-
 export function adoptAuthoritativeSnapshot(
   local: RoomState | null,
   incoming: RoomState,
@@ -787,56 +799,26 @@ export function adoptAuthoritativeSnapshot(
   if (!local || local.roomCode !== incoming.roomCode) {
     return structuredClone(incoming)
   }
-  if (incoming.adminEpoch > local.adminEpoch) {
+  if (incoming.creatorId !== local.creatorId) return local
+  const incomingCreator = incoming.players[incoming.creatorId]
+  const localCreator = local.players[local.creatorId]
+  if (
+    incomingCreator.sessionStartedAt > localCreator.sessionStartedAt ||
+    (incomingCreator.sessionStartedAt === localCreator.sessionStartedAt &&
+      incomingCreator.sessionId > localCreator.sessionId)
+  ) {
     return structuredClone(incoming)
   }
-  if (incoming.adminEpoch < local.adminEpoch) return local
-  if (incoming.adminId !== local.adminId) {
-    return mergeReplica(local, incoming)
+  if (
+    incomingCreator.sessionStartedAt < localCreator.sessionStartedAt ||
+    (incomingCreator.sessionStartedAt === localCreator.sessionStartedAt &&
+      incomingCreator.sessionId < localCreator.sessionId)
+  ) {
+    return local
   }
   return incoming.revision >= local.revision
     ? structuredClone(incoming)
     : local
-}
-
-export function electAdmin(
-  state: RoomState,
-  adminId: PlayerId,
-  now: number = Date.now(),
-  previousClockOffset = 0,
-): RoomState {
-  if (!state.players[adminId] || state.adminId === adminId) return state
-  const next = copyState(state)
-  next.adminPredecessorId = state.adminId
-  next.adminId = adminId
-  next.adminEpoch += 1
-  next.revision += 1
-  if (next.phase === 'stage' && next.round) {
-    const remaining = Math.max(
-      0,
-      next.round.deadline - (now + previousClockOffset),
-    )
-    next.round.deadline = now + remaining
-  }
-  return next
-}
-
-export function nextAdminCandidate(
-  state: RoomState,
-  connected: ReadonlySet<PlayerId>,
-): PlayerId | null {
-  const ring =
-    state.round && state.phase !== 'lobby'
-      ? state.round.order
-      : state.joinOrder
-  if (!ring.length) return null
-  const currentIndex = Math.max(0, ring.indexOf(state.adminId))
-
-  for (let offset = 1; offset <= ring.length; offset += 1) {
-    const candidate = ring[(currentIndex + offset) % ring.length]
-    if (connected.has(candidate)) return candidate
-  }
-  return null
 }
 
 export function getAssignment(

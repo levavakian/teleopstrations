@@ -38,7 +38,7 @@ Telestrations chain concurrently without a dedicated application server.
   deployed application static; the signaling relay helps peers discover each
   other but is not an application/game-state server.
 - **State management:** A pure, typed game-state reducer plus a transport
-  adapter. The room coordinator validates actions and publishes versioned state
+  adapter. The room creator validates actions and publishes versioned state
   snapshots; peers acknowledge updates and can request a fresh snapshot.
 - **Drawing:** Pointer-event HTML canvas with normalized coordinates, vector
   strokes, 16 fixed colors, 8 fixed widths, undo, and clear-with-confirmation.
@@ -85,26 +85,26 @@ contribution to every stage.
 ### Authoritative room state
 
 - Room settings: prompt duration, drawing duration, room/round IDs, and current
-  coordinator epoch.
+  creator session.
 - Roster: creator, frozen order, pending players, connection and submit status.
-- Round: stage number/type, coordinator deadline timestamp, books, accepted
+- Round: stage number/type, creator deadline timestamp, books, accepted
   submissions, and reveal position.
 - Drafts: latest text or strokes received for each current assignment.
 - Protocol messages: typed actions with player ID, round ID, stage ID, sequence
   number, and action ID so duplicates and stale messages are harmless.
 
-The coordinator is authoritative for membership, deadlines, stage transitions,
+The creator is authoritative for membership, deadlines, stage transitions,
 and accepted submissions. Peers render from versioned snapshots and keep their
 own current draft locally so a temporary connection interruption does not erase
-work. Canonical changes are pushed immediately; non-admin peers also request the
-current snapshot every 15 seconds and whenever an admin heartbeat advertises a
-newer cursor. Peers acknowledge their phase/stage/reveal cursor so the admin can
+work. Canonical changes are pushed immediately; other peers also request the
+current snapshot every 15 seconds and whenever a creator heartbeat advertises a
+newer cursor. Peers acknowledge their phase/stage/reveal cursor so the creator can
 see who is on the same page.
 
 ## Stage and deadline rules
 
-- The coordinator announces an absolute deadline; clients display a countdown
-  using a measured coordinator-clock offset.
+- The creator announces an absolute deadline; clients display a countdown using
+  a measured creator-clock offset.
 - Text drafts are synchronized after changes and on blur. Drawing strokes are
   sent incrementally and checkpointed periodically.
 - `Submit` records that version and marks the player complete. They may keep
@@ -122,7 +122,7 @@ see who is on the same page.
 - Transitions are idempotent and keyed by round/stage, preventing late packets
   from modifying a completed stage.
 - A peer that reconnects requests the latest snapshot, restores its assignment
-  and local draft, and gets the remaining coordinator time.
+  and local draft, and gets the remaining creator time.
 
 ## Screens and interaction
 
@@ -155,9 +155,8 @@ non-canvas controls, visible focus, reduced motion, and narrow mobile layouts.
 - Start the next round, promoting connected pending players.
 - End/reset the current round after confirmation.
 
-The next connected player in the applicable order automatically inherits these
-controls when the current admin heartbeat times out. Kicking players is outside
-the initial scope.
+These controls never transfer to another player. When the creator is offline,
+clients queue bounded/coalesced work and poll until the creator reconnects.
 
 ## Reliability and limitations
 
@@ -176,7 +175,7 @@ the initial scope.
 - There is no configured maximum player count. Full-mesh WebRTC and full-state
   replication still impose a practical device/network-dependent room-size
   limit.
-- State snapshots will be replicated sufficiently for reconnection/coordinator
+- State snapshots will be replicated sufficiently for reconnection/creator
   recovery. They remain local to room peers and browser storage; no analytics or
   permanent cloud game history is planned.
 
@@ -193,7 +192,7 @@ the initial scope.
      cases.
 3. **Networking and room lifecycle**
    - Add the transport interface and Trystero adapter.
-   - Implement room creation/join, identity restoration, coordinator snapshots,
+   - Implement room creation/join, identity restoration, creator snapshots,
      heartbeats, clock sync, disconnect/reconnect, and conflict handling.
 4. **Core user experience**
    - Implement landing, lobby, text stages, submission progress, deadlines,
@@ -247,9 +246,8 @@ the initial scope.
 
 ## Resolved product decisions
 
-1. Every peer receives the full replicated state. If the admin heartbeat times
-   out, the next connected player in the frozen round order (or lobby join
-   order) becomes admin and resumes coordination.
+1. Every peer receives creator-authored state. The creator is the permanent
+   authority; no player election occurs when that client disconnects.
 2. Room code plus normalized name is sufficient to reclaim a seat; this is an
    intentionally trust-based party game.
 3. Rounds require at least three players and have no configured maximum.

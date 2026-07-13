@@ -87,12 +87,9 @@ export interface RoundState {
 export type GamePhase = 'lobby' | 'stage' | 'reveal' | 'closed'
 
 export interface RoomState {
-  protocolVersion: 1
+  protocolVersion: 2
   roomCode: string
   creatorId: PlayerId
-  adminId: PlayerId
-  adminPredecessorId: PlayerId | null
-  adminEpoch: number
   revision: number
   settings: GameSettings
   players: Record<PlayerId, Player>
@@ -104,8 +101,9 @@ export interface RoomState {
 }
 
 export interface SyncCursor {
-  adminId: PlayerId
-  adminEpoch: number
+  creatorId: PlayerId
+  creatorSessionId: string
+  creatorSessionStartedAt: number
   revision: number
   phase: GamePhase
   roundId: string | null
@@ -113,10 +111,12 @@ export interface SyncCursor {
   stageIndex: number | null
   revealBookIndex: number | null
   revealPageIndex: number | null
+  revealComplete: boolean | null
 }
 
 export interface PeerSyncReport {
   playerId: PlayerId
+  sessionId: string
   cursor: SyncCursor
   receivedAt: number
 }
@@ -206,10 +206,9 @@ export type WireMessage =
     })
   | (GossipMessage & {
       type: 'heartbeat'
-      adminId: PlayerId
+      creatorId: PlayerId
       senderId: PlayerId
       sessionId: string
-      adminEpoch: number
       revision: number
       cursor: SyncCursor
       sentAt: number
@@ -219,11 +218,21 @@ export type WireMessage =
       envelope: IntentEnvelope
     })
   | (GossipMessage & {
+      type: 'intent-ack'
+      senderId: PlayerId
+      sessionId: string
+      targetPlayerId: PlayerId
+      intentId: string
+      accepted: boolean
+      revision: number
+      sentAt: number
+    })
+  | (GossipMessage & {
       type: 'snapshot'
       senderId: PlayerId
       sessionId: string
       state: RoomState
-      reason: 'push' | 'periodic' | 'join' | 'sync-response' | 'failover'
+      reason: 'push' | 'periodic' | 'join' | 'sync-response'
       sentAt: number
     })
   | (GossipMessage & {
