@@ -8,7 +8,7 @@ import {
 } from 'react'
 
 import {createId} from './game'
-import {DRAWING_COLORS, PEN_SIZES} from './drawing'
+import {DRAWING_COLORS, PEN_SIZES, paintDrawing, paintStroke} from './drawing'
 import type {DrawPoint, Stroke} from './types'
 
 interface CanvasSurfaceProps {
@@ -29,39 +29,6 @@ function pointOnCanvas(
   }
 }
 
-function paintStroke(context: CanvasRenderingContext2D, stroke: Stroke): void {
-  const color = DRAWING_COLORS[stroke.color] ?? DRAWING_COLORS[0]
-  const width = PEN_SIZES[stroke.size] ?? PEN_SIZES[2]
-  context.strokeStyle = color
-  context.fillStyle = color
-  context.lineCap = 'round'
-  context.lineJoin = 'round'
-  context.lineWidth = width
-
-  if (stroke.points.length === 1) {
-    const point = stroke.points[0]
-    context.beginPath()
-    context.arc(
-      point.x * context.canvas.width,
-      point.y * context.canvas.height,
-      width / 2,
-      0,
-      Math.PI * 2,
-    )
-    context.fill()
-    return
-  }
-
-  context.beginPath()
-  stroke.points.forEach((point, index) => {
-    const x = point.x * context.canvas.width
-    const y = point.y * context.canvas.height
-    if (index === 0) context.moveTo(x, y)
-    else context.lineTo(x, y)
-  })
-  context.stroke()
-}
-
 export function DrawingCanvas({
   strokes,
   onChange,
@@ -79,7 +46,7 @@ export function DrawingCanvas({
     if (!canvas || !context) return
     context.fillStyle = '#ffffff'
     context.fillRect(0, 0, canvas.width, canvas.height)
-    for (const stroke of strokes) paintStroke(context, stroke)
+    paintDrawing(context, strokes)
   }, [strokes])
 
   useEffect(redraw, [redraw])

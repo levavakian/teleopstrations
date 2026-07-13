@@ -1,3 +1,5 @@
+import {readFile} from 'node:fs/promises'
+
 import {expect, test, type BrowserContext, type Page} from '@playwright/test'
 
 interface Trio {
@@ -96,7 +98,7 @@ async function drawStroke(
 
 test('three players complete, reveal, and begin another round', async ({
   context,
-}) => {
+}, testInfo) => {
   const {host, bee, cee, roomCode} = await createTrio(context)
   await host.getByRole('button', {name: /shuffle & start round/i}).click()
 
@@ -168,6 +170,25 @@ test('three players complete, reveal, and begin another round', async ({
       page.getByRole('heading', {name: 'Describe what you see'}),
     ).toBeVisible()
   }
+  await host.getByRole('button', {name: 'Enlarge drawing'}).click()
+  await expect(
+    host.getByRole('dialog', {name: 'Enlarged drawing'}),
+  ).toBeVisible()
+  if (process.env.RECORD_DEMO === '1') {
+    await host.waitForTimeout(1_500)
+    await host.screenshot({
+      path: testInfo.outputPath('enlarged-drawing.png'),
+      fullPage: true,
+    })
+  }
+  await host.keyboard.press('Escape')
+  await expect(
+    host.getByRole('dialog', {name: 'Enlarged drawing'}),
+  ).toHaveCount(0)
+  await host.getByRole('button', {name: 'Enlarge drawing'}).click()
+  await host
+    .getByRole('button', {name: 'Close enlarged drawing'})
+    .click()
   await host.getByLabel(/What do you think/).fill('Two crossed shooting stars')
   await bee.getByLabel(/What do you think/).fill('A very straight horizon')
   await cee.getByLabel(/What do you think/).fill('A tall and mysterious line')
@@ -176,6 +197,25 @@ test('three players complete, reveal, and begin another round', async ({
   }
 
   await expect(host.getByText('The grand reveal', {exact: false})).toBeVisible()
+  const downloadPromise = host.waitForEvent('download')
+  await host.getByRole('button', {name: 'Save playbook'}).click()
+  const download = await downloadPromise
+  await expect(host.getByRole('button', {name: 'Saved!'})).toBeVisible()
+  expect(download.suggestedFilename()).toMatch(/-playbook\.png$/)
+  const downloadPath = await download.path()
+  if (!downloadPath) throw new Error('Playbook download did not produce a file')
+  const png = await readFile(downloadPath)
+  expect(png.subarray(1, 4).toString()).toBe('PNG')
+  expect(png.readUInt32BE(16)).toBeGreaterThan(500)
+  expect(png.readUInt32BE(20)).toBeGreaterThan(1_000)
+  if (process.env.RECORD_DEMO === '1') {
+    await download.saveAs(testInfo.outputPath('saved-playbook.png'))
+    await host.screenshot({
+      path: testInfo.outputPath('save-playbook.png'),
+      fullPage: true,
+    })
+    await host.waitForTimeout(1_500)
+  }
   const openingPrompts: string[] = []
   const revealedOwners: string[] = []
   for (let bookIndex = 0; bookIndex < 3; bookIndex += 1) {
@@ -218,34 +258,39 @@ test('three players complete, reveal, and begin another round', async ({
   }
 })
 
-test('the next connected round player takes over when admin disappears', async ({
+test('clients queue work until the creator reconnects as authority', async ({
   context,
 }) => {
-  const {host, bee, cee} = await createTrio(context)
+  const {host, bee, roomCode} = await createTrio(context, 3, 3)
   await host.getByRole('button', {name: /shuffle & start round/i}).click()
   await expect(
     bee.getByRole('heading', {name: 'Write a secret prompt'}),
   ).toBeVisible()
 
-  const order = await bee
-    .locator('.stage-roster .player-name')
-    .evaluateAll((players) =>
-      players.map((player) => player.firstChild?.textContent?.trim()),
-    )
-  const hostIndex = order.indexOf('Host')
-  const successor = order[(hostIndex + 1) % order.length]
-  const successorPage = successor === 'Guest B' ? bee : cee
-  const observerPage = successor === 'Guest B' ? cee : bee
-
   await host.close()
+  await bee
+    .getByLabel(/Start this playbook/)
+    .fill('Queued while the creator was offline')
+  await bee.getByRole('button', {name: 'Submit prompt'}).click()
   await expect(
-    successorPage.getByRole('button', {name: 'Next stage'}),
-  ).toBeVisible({timeout: 12_000})
+    bee.getByText('Creator connection interrupted', {exact: false}),
+  ).toBeVisible({timeout: 10_000})
+  await expect(
+    bee.getByRole('button', {name: 'Next stage'}),
+  ).toHaveCount(0)
 
-  await forceAdvance(successorPage)
+  const returnedCreator = await joinRoom(
+    context,
+    roomCode,
+    'Host',
+    'Write a secret prompt',
+  )
   await expect(
-    observerPage.getByRole('heading', {name: 'Draw what you read'}),
+    returnedCreator.getByRole('button', {name: 'Next stage'}),
   ).toBeVisible()
+  await expect(returnedCreator.getByText(/1 of 3 submitted/)).toBeVisible({
+    timeout: 10_000,
+  })
 })
 
 test('a frozen player reclaims their assignment by name', async ({context}) => {
@@ -291,6 +336,32 @@ test('an older same-name tab cannot steal a reclaimed session back', async ({
   ).toBeVisible()
   await expect(
     host.locator('.player-name').filter({hasText: 'Guest C'}),
+  ).toHaveCount(1)
+})
+
+test('a same-name tab cannot replace an active creator session', async ({
+  context,
+}) => {
+  const {host, roomCode} = await createTrio(context)
+  const contender = await context.newPage()
+  await contender.goto(
+    `/?transport=broadcast#${new URLSearchParams({room: roomCode})}`,
+  )
+  await contender.getByLabel('Your name').fill('Host')
+  await contender.getByRole('button', {name: /join room/i}).click()
+
+  await expect(
+    contender.getByRole('heading', {name: 'Welcome back, Host'}),
+  ).toBeVisible()
+  await contender.waitForTimeout(6_000)
+  await expect(
+    contender.getByRole('heading', {name: 'Welcome back, Host'}),
+  ).toBeVisible()
+  await expect(
+    host.getByRole('button', {name: /shuffle & start round/i}),
+  ).toBeVisible()
+  await expect(
+    host.locator('.player-name').filter({hasText: /^Host/}),
   ).toHaveCount(1)
 })
 
@@ -357,7 +428,7 @@ test('deadlines capture drafts, preserve submissions, and keep drawing strokes',
   expect(nonWhiteCanvases).toContain(true)
 })
 
-test('admin can kick between rounds, end early, and close the room', async ({
+test('creator can kick between rounds, end early, and close the room', async ({
   context,
 }, testInfo) => {
   const {host, bee, cee, roomCode} = await createTrio(context)

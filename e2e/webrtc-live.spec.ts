@@ -43,7 +43,7 @@ test('three browsers form a WebRTC mesh and synchronize game state', async ({
 
   for (const peer of [host, second, third]) {
     await expect(peer.locator('.connection-pill')).toContainText(
-      'WebRTC mesh · 3 online',
+      /WebRTC · [12] direct links?/,
       {timeout: 60_000},
     )
   }
@@ -56,4 +56,8 @@ test('three browsers form a WebRTC mesh and synchronize game state', async ({
   await second.getByLabel(/Start this playbook/).fill('Sent over WebRTC')
   await second.getByRole('button', {name: 'Submit prompt'}).click()
   await expect(host.getByText(/1 of 3 submitted/)).toBeVisible()
+  await expect(host.locator('.sync-status')).toContainText(
+    '2/2 on this page',
+    {timeout: 15_000},
+  )
 })

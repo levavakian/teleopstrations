@@ -1,6 +1,8 @@
 import {useEffect, useMemo, useState, type FormEvent} from 'react'
+import {createPortal} from 'react-dom'
 
 import {DrawingCanvas} from './DrawingCanvas'
+import {downloadPlaybookImage} from './playbookImage'
 import {
   DEFAULT_SETTINGS,
   MIN_PLAYERS,
@@ -17,15 +19,18 @@ import {
   normalizeName,
   normalizeRoomCode,
   playerIdForName,
+  syncCursorForState,
 } from './game'
 import type {
   Content,
   DrawingContent,
   GameSettings,
+  PeerSyncReport,
   PlayerSession,
   RoomSessionConfig,
   RoomState,
   Stroke,
+  SyncCursor,
   TextContent,
 } from './types'
 import {useGameRoom} from './useGameRoom'
@@ -57,6 +62,16 @@ function makePlayer(name: string): PlayerSession {
     sessionId: createId(),
     sessionStartedAt: Date.now(),
   }
+}
+
+function isCreatorAuthority(
+  state: RoomState,
+  config: RoomSessionConfig,
+): boolean {
+  return (
+    state.creatorId === config.player.id &&
+    state.players[state.creatorId]?.sessionId === config.player.sessionId
+  )
 }
 
 function rememberSession(config: RoomSessionConfig): void {
@@ -311,9 +326,103 @@ function ConnectionPill({
   return (
     <div className="connection-pill" title={`${peerCount} direct peer connections`}>
       <span className={`status-dot${self?.connected ? ' is-online' : ''}`} />
-      {kind === 'webrtc' ? 'WebRTC mesh' : 'Local test mesh'} · {peerCount + 1}{' '}
-      online
+      {kind === 'webrtc'
+        ? `WebRTC · ${peerCount} direct ${peerCount === 1 ? 'link' : 'links'}`
+        : `Local test mesh · ${peerCount + 1} online`}
     </div>
+  )
+}
+
+function CreatorSyncStatus({
+  state,
+  reports,
+}: {
+  state: RoomState
+  reports: Record<string, PeerSyncReport>
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const peers = state.joinOrder.filter((playerId) => playerId !== state.creatorId)
+  if (!peers.length) return null
+  const creatorCursor = syncCursorForState(state)
+  const sameLocation = (cursor: SyncCursor): boolean =>
+    cursor.creatorId === creatorCursor.creatorId &&
+    cursor.creatorSessionId === creatorCursor.creatorSessionId &&
+    cursor.phase === creatorCursor.phase &&
+    cursor.roundId === creatorCursor.roundId &&
+    cursor.stageIndex === creatorCursor.stageIndex &&
+    cursor.revealBookIndex === creatorCursor.revealBookIndex &&
+    cursor.revealPageIndex === creatorCursor.revealPageIndex &&
+    cursor.revealComplete === creatorCursor.revealComplete
+  const reportIsOnPage = (
+    playerId: string,
+    report: PeerSyncReport | undefined,
+  ): boolean =>
+    Boolean(
+      report &&
+        state.players[playerId]?.connected &&
+        report.sessionId === state.players[playerId]?.sessionId &&
+        now - report.receivedAt < 20_000 &&
+        sameLocation(report.cursor),
+    )
+  const locationLabel = (cursor: SyncCursor): string => {
+    if (cursor.phase === 'stage') {
+      return `Stage ${(cursor.stageIndex ?? 0) + 1}`
+    }
+    if (cursor.phase === 'reveal') {
+      if (cursor.revealComplete) return 'Reveal complete'
+      return `Playbook ${(cursor.revealBookIndex ?? 0) + 1}, page ${(cursor.revealPageIndex ?? 0) + 1}`
+    }
+    if (cursor.phase === 'closed') return 'Room closed'
+    return 'Lobby'
+  }
+  const syncedCount = peers.filter((playerId) => {
+    return reportIsOnPage(playerId, reports[playerId])
+  }).length
+
+  return (
+    <details className="sync-status" open>
+      <summary>
+        Player sync · {syncedCount}/{peers.length} on this page
+      </summary>
+      <ul>
+        {peers.map((playerId) => {
+          const report = reports[playerId]
+          const player = state.players[playerId]
+          const onPage = reportIsOnPage(playerId, report)
+          const exact =
+            onPage && report?.cursor.revision === creatorCursor.revision
+          return (
+            <li key={playerId} className={exact ? 'is-synced' : ''}>
+              <span
+                className="sync-status__mark"
+                aria-label={onPage ? 'On the same page' : 'Not yet on this page'}
+              >
+                {onPage ? '✓' : '…'}
+              </span>
+              <span className="sync-status__player">
+                <strong>{player?.name ?? playerId}</strong>
+                <small>
+                  {report
+                    ? `Last update: ${locationLabel(report.cursor)}`
+                    : 'Waiting for first update'}
+                </small>
+              </span>
+              <span className="sync-status__state">
+                {exact
+                  ? 'In sync'
+                  : onPage
+                    ? 'Same page · state update pending'
+                    : `Creator: ${locationLabel(creatorCursor)}`}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </details>
   )
 }
 
@@ -410,16 +519,12 @@ function PlayerList({
         <span className="player-name">
           {player.name}
           <small>
-            {playerId === state.adminId ? 'Admin' : null}
-            {playerId === state.creatorId && playerId !== state.adminId
-              ? 'Creator'
-              : null}
+            {playerId === state.creatorId ? 'Creator · Authority' : null}
             {pendingPlayer ? 'Next round' : null}
             {!player.connected ? 'Disconnected' : null}
           </small>
         </span>
         {onKick &&
-        playerId !== state.adminId &&
         playerId !== state.creatorId ? (
           <button
             className="kick-player"
@@ -522,9 +627,7 @@ function Lobby({
   const connected = state.joinOrder.filter(
     (id) => state.players[id]?.connected,
   ).length
-  const canAdmin =
-    config.player.id === state.adminId ||
-    config.player.id === state.creatorId
+  const canAdmin = isCreatorAuthority(state, config)
 
   return (
     <main className="room-main lobby-page">
@@ -553,7 +656,7 @@ function Lobby({
         {canAdmin ? (
           <div className="admin-panel">
             <div>
-              <span className="admin-panel__label">Admin controls</span>
+              <span className="admin-panel__label">Creator controls</span>
               <h2>Set the pace</h2>
             </div>
             <SettingsEditor
@@ -598,7 +701,7 @@ function Lobby({
           <div className="waiting-note">
             <span className="waiting-note__spinner" />
             <span>
-              Waiting for <strong>{state.players[state.adminId]?.name}</strong>{' '}
+              Waiting for <strong>{state.players[state.creatorId]?.name}</strong>{' '}
               to start the round
             </span>
           </div>
@@ -661,6 +764,28 @@ function formatCountdown(milliseconds: number): string {
 }
 
 function SourceCard({content}: {content: Content | null}) {
+  const [expanded, setExpanded] = useState(false)
+  useEffect(() => {
+    if (!expanded) return
+    const previousOverflow = document.body.style.overflow
+    const previouslyFocused = document.activeElement as HTMLElement | null
+    document.body.style.overflow = 'hidden'
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false)
+      if (event.key === 'Tab') {
+        event.preventDefault()
+        document
+          .querySelector<HTMLButtonElement>('.drawing-modal__close')
+          ?.focus()
+      }
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape)
+      document.body.style.overflow = previousOverflow
+      previouslyFocused?.focus()
+    }
+  }, [expanded])
   if (!content) return null
   return (
     <section className="source-card">
@@ -670,11 +795,57 @@ function SourceCard({content}: {content: Content | null}) {
       {content.kind === 'text' ? (
         <blockquote>{content.text || <em>An empty description</em>}</blockquote>
       ) : (
-        <DrawingCanvas
-          strokes={content.strokes}
-          readOnly
-          label="Drawing to describe"
-        />
+        <>
+          <button
+            className="source-drawing-preview"
+            type="button"
+            aria-label="Enlarge drawing"
+            onClick={() => setExpanded(true)}
+          >
+            <DrawingCanvas
+              strokes={content.strokes}
+              readOnly
+              label="Drawing to describe"
+            />
+            <span>Click to enlarge</span>
+          </button>
+          {expanded
+            ? createPortal(
+                <div
+                  className="drawing-modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Enlarged drawing"
+                  aria-describedby="enlarged-drawing-help"
+                >
+                  <div
+                    className="drawing-modal__content"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <button
+                      className="drawing-modal__close"
+                      type="button"
+                      aria-label="Close enlarged drawing"
+                      autoFocus
+                      onClick={() => setExpanded(false)}
+                    >
+                      ×
+                    </button>
+                    <DrawingCanvas
+                      strokes={content.strokes}
+                      readOnly
+                      label="Enlarged drawing canvas"
+                    />
+                    <p id="enlarged-drawing-help" className="sr-only">
+                      Enlarged view of the drawing. Press Escape or use the
+                      close button to return to your description.
+                    </p>
+                  </div>
+                </div>,
+                document.body,
+              )
+            : null}
+        </>
       )}
     </section>
   )
@@ -833,6 +1004,7 @@ function Stage({
   submit,
   sendControl,
   clockOffsetMs,
+  creatorConnected,
 }: {
   state: RoomState
   config: RoomSessionConfig
@@ -840,15 +1012,15 @@ function Stage({
   submit: ReturnType<typeof useGameRoom>['submit']
   sendControl: ReturnType<typeof useGameRoom>['sendControl']
   clockOffsetMs: number
+  creatorConnected: boolean
 }) {
   const round = state.round!
   const remaining = useCountdown(round.deadline, clockOffsetMs)
   const assignment = getAssignment(state, config.player.id)
   const source = getAssignmentSource(state, config.player.id)
   const submittedCount = getSubmissionCount(state)
-  const canAdmin =
-    config.player.id === state.adminId ||
-    config.player.id === state.creatorId
+  const canAdmin = isCreatorAuthority(state, config)
+  const isCreator = canAdmin
 
   if (!assignment || isPendingPlayer(state, config.player.id)) {
     return (
@@ -858,7 +1030,7 @@ function Stage({
           <h1>You’re in the room</h1>
           <p>
             This round’s order is already frozen. Watch the progress here; the
-            admin can include you when the next round begins.
+            creator can include you when the next round begins.
           </p>
           <div className="giant-progress">
             {submittedCount}<span>/{round.order.length} submitted</span>
@@ -885,7 +1057,13 @@ function Stage({
           <h1>{currentStageLabel(round)}</h1>
         </div>
         <div className={`countdown${remaining < 10_000 ? ' is-urgent' : ''}`}>
-          <span>{deadlinePassed ? 'Closing stage' : 'Time remaining'}</span>
+          <span>
+            {!creatorConnected && !isCreator
+              ? 'Waiting for creator'
+              : deadlinePassed
+                ? 'Closing stage'
+                : 'Time remaining'}
+          </span>
           <strong>{formatCountdown(remaining)}</strong>
         </div>
       </header>
@@ -1002,14 +1180,14 @@ function Reveal({
   const entry = book.entries[reveal.pageIndex]
   const owner = state.players[book.ownerId]
   const author = state.players[entry.authorId]
-  const canPresent =
-    config.player.id === state.creatorId || config.player.id === book.ownerId
-  const canAdmin =
-    config.player.id === state.adminId ||
-    config.player.id === state.creatorId
+  const canAdmin = isCreatorAuthority(state, config)
+  const canPresent = canAdmin || config.player.id === book.ownerId
   const connected = state.joinOrder.filter(
     (id) => state.players[id]?.connected,
   ).length
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   return (
     <main className="reveal-page">
@@ -1043,14 +1221,42 @@ function Reveal({
             </button>
           ) : null}
         </div>
-        <div className="presenter-badge">
-          <span>{owner.name.slice(0, 1).toUpperCase()}</span>
-          <div>
-            Presenting
-            <strong>{owner.name}</strong>
+        <div className="reveal-heading__actions">
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={saving}
+            onClick={async () => {
+              setSaving(true)
+              setSaved(false)
+              setSaveError('')
+              try {
+                await downloadPlaybookImage(book, state.players)
+                setSaved(true)
+                window.setTimeout(() => setSaved(false), 2_000)
+              } catch (error) {
+                setSaveError(
+                  error instanceof Error
+                    ? error.message
+                    : 'Unable to save this playbook.',
+                )
+              } finally {
+                setSaving(false)
+              }
+            }}
+          >
+            {saving ? 'Preparing image…' : saved ? 'Saved!' : 'Save playbook'}
+          </button>
+          <div className="presenter-badge">
+            <span>{owner.name.slice(0, 1).toUpperCase()}</span>
+            <div>
+              Presenting
+              <strong>{owner.name}</strong>
+            </div>
           </div>
         </div>
       </header>
+      {saveError ? <p className="form-error reveal-save-error">{saveError}</p> : null}
 
       <section className="reveal-stage">
         <div className="paper-number">
@@ -1276,6 +1482,15 @@ function Room({
           Connection notice: {connection.error}
         </div>
       ) : null}
+      {!room.creatorConnected && !isCreatorAuthority(state, config) ? (
+        <div className="network-warning network-warning--authority" role="status">
+          Creator connection interrupted. Your work is queued while this client
+          retries the creator and polls for current state.
+        </div>
+      ) : null}
+      {isCreatorAuthority(state, config) ? (
+        <CreatorSyncStatus state={state} reports={room.syncReports} />
+      ) : null}
       {state.phase === 'closed' ? (
         <main className="connection-page connection-page--in-room">
           <div className="connection-card room-ended-card">
@@ -1285,7 +1500,7 @@ function Room({
             <span className="step-label">Room closed</span>
             <h1>This room has been shut down</h1>
             <p>
-              The admin deleted the active game. Create a fresh room to play
+              The creator deleted the active game. Create a fresh room to play
               again.
             </p>
             <button className="button button--primary" type="button" onClick={exit}>
@@ -1301,7 +1516,7 @@ function Room({
             </span>
             <span className="step-label">Removed from room</span>
             <h1>You’ve been removed from this room</h1>
-            <p>The admin removed this name from the next-round roster.</p>
+            <p>The creator removed this name from the next-round roster.</p>
             <button className="button button--primary" type="button" onClick={exit}>
               Back to home
             </button>
@@ -1332,6 +1547,7 @@ function Room({
           submit={room.submit}
           sendControl={room.sendControl}
           clockOffsetMs={room.clockOffsetMs}
+          creatorConnected={room.creatorConnected}
         />
       ) : (
         <Reveal
