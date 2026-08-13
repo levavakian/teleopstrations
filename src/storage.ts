@@ -60,36 +60,66 @@ export function canResumeAsHost(roomCode: string, name: string): boolean {
 }
 
 const TURN_SERVERS_KEY = 'teleopstrations:v3:turn-servers'
+const SHARED_TURN_SERVERS_KEY = 'teleopstrations:v3:turn-servers:shared'
 
 /**
  * Optional TURN relay escape hatch. No provider offers open, credential-free
- * TURN (relaying full traffic is too costly), so groups on restrictive
- * networks can obtain their own credentials — for example the free tier of a
- * provider like Metered — and paste them once per browser:
- *
- * localStorage.setItem('teleopstrations:v3:turn-servers', JSON.stringify([
- *   {urls: 'turn:example.relay:443', username: '...', credential: '...'},
- * ]))
+ * TURN (relaying full traffic is too costly), so one player obtains free
+ * credentials — for example Metered's or ExpressTURN's free tier — and
+ * pastes them under “Connection help”. Invite links copied from that device
+ * then carry the settings to every player who opens them, so the rest of
+ * the group never has to configure anything.
  */
 export function loadTurnServers(): TurnServerConfig[] | null {
   try {
-    return parseTurnServers(localStorage.getItem(TURN_SERVERS_KEY) ?? '')
+    const manual = parseTurnServers(
+      localStorage.getItem(TURN_SERVERS_KEY) ?? '',
+    )
+    const shared = parseTurnServers(
+      localStorage.getItem(SHARED_TURN_SERVERS_KEY) ?? '',
+    )
+    if (!manual && !shared) return null
+    const merged: TurnServerConfig[] = []
+    const seen = new Set<string>()
+    for (const server of [...(manual ?? []), ...(shared ?? [])]) {
+      const key = JSON.stringify(server)
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(server)
+    }
+    return merged
   } catch {
     return null
   }
 }
 
+function isServerEntry(entry: unknown): entry is TurnServerConfig {
+  return (
+    Boolean(entry) &&
+    typeof entry === 'object' &&
+    (typeof (entry as TurnServerConfig).urls === 'string' ||
+      Array.isArray((entry as TurnServerConfig).urls))
+  )
+}
+
+/**
+ * Accepts the shapes providers actually hand out: a bare `iceServers` array,
+ * a single server object, or a `{iceServers: ...}` wrapper around either
+ * (Cloudflare's credentials API returns the latter with a single object).
+ */
 export function parseTurnServers(text: string): TurnServerConfig[] | null {
   try {
-    const parsed = JSON.parse(text) as unknown
-    if (!Array.isArray(parsed) || parsed.length === 0) return null
-    const servers = parsed.filter(
-      (entry): entry is TurnServerConfig =>
-        Boolean(entry) &&
-        typeof entry === 'object' &&
-        (typeof (entry as TurnServerConfig).urls === 'string' ||
-          Array.isArray((entry as TurnServerConfig).urls)),
-    )
+    let parsed = JSON.parse(text) as unknown
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      'iceServers' in parsed
+    ) {
+      parsed = (parsed as {iceServers: unknown}).iceServers
+    }
+    const entries = Array.isArray(parsed) ? parsed : [parsed]
+    const servers = entries.filter(isServerEntry)
     return servers.length > 0 ? servers : null
   } catch {
     return null
@@ -104,7 +134,11 @@ export function loadTurnServersText(): string {
   }
 }
 
-/** Saves pasted TURN JSON; returns how the input was handled. */
+/**
+ * Saves pasted TURN JSON; returns how the input was handled. Touching the
+ * manual settings makes them the single source of truth, so any config
+ * previously adopted from an invite link is dropped alongside.
+ */
 export function saveTurnServersText(
   text: string,
 ): 'saved' | 'cleared' | 'invalid' {
@@ -112,14 +146,68 @@ export function saveTurnServersText(
   try {
     if (!trimmed) {
       localStorage.removeItem(TURN_SERVERS_KEY)
+      localStorage.removeItem(SHARED_TURN_SERVERS_KEY)
       return 'cleared'
     }
     const servers = parseTurnServers(trimmed)
     if (!servers) return 'invalid'
     localStorage.setItem(TURN_SERVERS_KEY, JSON.stringify(servers))
+    localStorage.removeItem(SHARED_TURN_SERVERS_KEY)
     return 'saved'
   } catch {
     return 'invalid'
+  }
+}
+
+/** True when this device is using TURN settings adopted from an invite link. */
+export function hasSharedTurnServers(): boolean {
+  try {
+    return (
+      parseTurnServers(
+        localStorage.getItem(SHARED_TURN_SERVERS_KEY) ?? '',
+      ) !== null
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Invite links can carry the sender's TURN settings so one player's setup
+ * reaches the whole group. The payload is base64url-encoded JSON — compact
+ * in a URL and free of percent-escaping noise.
+ */
+export function encodeTurnParam(servers: TurnServerConfig[]): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(servers))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+export function decodeTurnParam(param: string): TurnServerConfig[] | null {
+  try {
+    const base64 = param.replace(/-/g, '+').replace(/_/g, '/')
+    const binary = atob(base64)
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+    return parseTurnServers(new TextDecoder().decode(bytes))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Adopts TURN settings arriving via an invite link. They persist for future
+ * sessions on this device but never override manually saved settings (both
+ * are offered to ICE, which simply tries every relay it is given).
+ */
+export function adoptSharedTurnServers(param: string): boolean {
+  const servers = decodeTurnParam(param)
+  if (!servers) return false
+  try {
+    localStorage.setItem(SHARED_TURN_SERVERS_KEY, JSON.stringify(servers))
+    return true
+  } catch {
+    return false
   }
 }
 

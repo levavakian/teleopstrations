@@ -71,9 +71,13 @@ trusted party game: name-only rejoining and host-held hidden content are not
 designed to resist malicious players.
 The room creator is the permanent host and single state writer; there is no
 host election or transfer, only resume-by-rejoining from the same browser.
-The static deployment has no TURN relay, so a device that cannot connect to
-the host can still be isolated on a restrictive network. TURN requires an
-external service with short-lived credentials; permanent credentials must not
-be shipped in the Pages bundle.
+The static deployment ships no TURN relay, so whether a direct link forms
+depends on both networks cooperating (phone carrier NAT is the worst case) —
+connections can succeed one attempt and fail the next. No provider offers
+credential-free TURN (`scripts/probe-turn.mjs` verifies the well-known
+"public" relays are dead), so the fix is self-service: one player pastes free
+credentials from a provider such as Metered or ExpressTURN under "Connection
+help", and invite links copied from that device carry the settings to every
+player who opens them.
 Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
 clears its round, while permanent deletion cannot exist without a server.
