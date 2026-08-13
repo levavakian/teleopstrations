@@ -1,19 +1,16 @@
 import {describe, expect, it} from 'vitest'
 
 import {
-  adoptAuthoritativeSnapshot,
   advanceStage,
   applyIntent,
   createInitialRoom,
   getAssignment,
-  isCreatorAuthoritativeSnapshot,
-  isSyncCursorAhead,
   joinPlayer,
   playerIdForName,
   reclaimCreatorSession,
   startRound,
-  syncCursorForState,
 } from '../src/game'
+import {hostIncarnationOf, isNewerHostState} from '../src/protocol'
 import type {
   Candidate,
   Content,
@@ -154,6 +151,33 @@ describe('room and round lifecycle', () => {
 })
 
 describe('book rotation and finalization', () => {
+  it.each([3, 4, 5])(
+    'shows each player a distinct predecessor fallback prompt (%i players)',
+    (count) => {
+      const {state} = roomWithPlayers(count)
+      const started = startRound(state, 10_000, () => 0.999)
+      const order = started.round!.order
+      // Nobody submits an opening prompt; the deadline fires.
+      const drawing = advanceStage(started, 80_000)
+
+      const seenSources = new Set<string>()
+      for (const [index, playerId] of order.entries()) {
+        const assignment = drawing.round!.assignments[playerId]
+        const predecessor = order[(index - 1 + count) % count]
+        expect(assignment.bookOwnerId).toBe(predecessor)
+        const source =
+          drawing.round!.books[assignment.bookOwnerId].entries[0]
+        expect(source.content).toEqual({
+          kind: 'text',
+          text: `${drawing.players[predecessor].name} did not submit a prompt in time, draw what you think of them`,
+        })
+        seenSources.add(assignment.bookOwnerId)
+      }
+      // Every player draws a different book: no duplicated prompts.
+      expect(seenSources.size).toBe(count)
+    },
+  )
+
   it.each([3, 4, 5, 8, 20])(
     'rotates authors correctly for %i players',
     (count) => {
@@ -335,7 +359,7 @@ describe('creator authority', () => {
     expect(attempted).toBe(state)
   })
 
-  it('fences the previous creator session when recovery resumes', () => {
+  it('resumes hosting under a strictly newer incarnation', () => {
     const {state, sessions} = roomWithPlayers(3)
     const recovered = reclaimCreatorSession(state, {
       ...sessions[0],
@@ -347,78 +371,39 @@ describe('creator authority', () => {
     expect(recovered.players[recovered.creatorId].sessionId).toBe(
       'creator-recovered',
     )
-    expect(
-      isCreatorAuthoritativeSnapshot(
-        recovered,
-        recovered.creatorId,
-        sessions[0].sessionId,
-      ),
-    ).toBe(false)
-  })
-
-  it('accepts snapshots only when authored by the creator session', () => {
-    const {state, sessions} = roomWithPlayers(3)
-
-    expect(
-      isCreatorAuthoritativeSnapshot(
-        state,
-        state.creatorId,
-        sessions[0].sessionId,
-      ),
-    ).toBe(true)
-    expect(
-      isCreatorAuthoritativeSnapshot(
-        state,
-        sessions[1].id,
-        sessions[1].sessionId,
-      ),
-    ).toBe(false)
-    expect(
-      isCreatorAuthoritativeSnapshot(
-        state,
-        state.creatorId,
-        'stale-session',
-      ),
-    ).toBe(false)
-  })
-
-  it('detects and fast-forwards authoritative stage and reveal cursors', () => {
-    const {state} = roomWithPlayers(3)
-    const stageZero = startRound(state, 10_000, () => 0.999)
-    const stageOne = advanceStage(stageZero, 20_000)
-    const reveal = advanceStage(advanceStage(stageOne, 30_000), 40_000)
-
-    expect(
-      isSyncCursorAhead(
-        syncCursorForState(stageOne),
-        syncCursorForState(stageZero),
-      ),
-    ).toBe(true)
-    expect(
-      adoptAuthoritativeSnapshot(stageZero, stageOne).round?.stageIndex,
-    ).toBe(1)
-    expect(
-      isSyncCursorAhead(
-        syncCursorForState(reveal),
-        syncCursorForState(stageOne),
-      ),
-    ).toBe(true)
-    expect(adoptAuthoritativeSnapshot(stageOne, reveal).phase).toBe('reveal')
-  })
-
-  it('adopts the creator snapshot exactly without client-only state', () => {
-    const {state, sessions} = roomWithPlayers(3)
-    const authoritative = startRound(state, 10_000, () => 0.999)
-    const local = structuredClone(authoritative)
-    getAssignment(local, sessions[1].id)!.draft = candidate(
-      sessions[1],
-      9,
-      {kind: 'text', text: 'Client-only backup'},
+    expect(hostIncarnationOf(recovered)).toBeGreaterThan(
+      hostIncarnationOf(state),
     )
+  })
 
-    const adopted = adoptAuthoritativeSnapshot(local, authoritative)
-    expect(getAssignment(adopted, sessions[1].id)?.draft).toBeNull()
-    expect(adopted).not.toBe(authoritative)
+  it('orders host output by incarnation before sequence', () => {
+    expect(isNewerHostState(null, {incarnation: 1, seq: 0})).toBe(true)
+    expect(
+      isNewerHostState({incarnation: 1, seq: 5}, {incarnation: 1, seq: 6}),
+    ).toBe(true)
+    expect(
+      isNewerHostState({incarnation: 1, seq: 5}, {incarnation: 1, seq: 5}),
+    ).toBe(false)
+    expect(
+      isNewerHostState({incarnation: 1, seq: 5}, {incarnation: 1, seq: 4}),
+    ).toBe(false)
+    expect(
+      isNewerHostState({incarnation: 1, seq: 900}, {incarnation: 2, seq: 0}),
+    ).toBe(true)
+    expect(
+      isNewerHostState({incarnation: 2, seq: 0}, {incarnation: 1, seq: 900}),
+    ).toBe(false)
+  })
+
+  it('keeps a resumed round deadline at least twenty seconds out', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const started = startRound(state, 10_000, () => 0.999)
+    const resumed = reclaimCreatorSession(
+      started,
+      {...sessions[0], sessionId: 'next', sessionStartedAt: 2_000},
+      50_000,
+    )
+    expect(resumed.round!.deadline).toBeGreaterThanOrEqual(70_000)
   })
 
   it('rejects oversized client content', () => {

@@ -8,157 +8,118 @@ rejoin, so the protocol does not claim to resist a player who modifies the
 client, copies another name, or forges visible room data.
 
 Within that trust model, the protocol is designed to tolerate duplicate,
-delayed, reordered, and temporarily undeliverable messages; browser refreshes;
-partial WebRTC graphs; and a temporarily unavailable creator.
+delayed, reordered, and dropped messages; browser refreshes; temporary
+partitions; and a host tab that closes and later rejoins.
 
-## Authority invariants
+## Topology: one host, plain clients
 
-1. The room creator is the only canonical state writer.
-2. There is no creator election, acting creator, or automatic authority
-   transfer.
-3. A local tab is authoritative only when both its player ID and session ID
-   match the creator record in canonical state.
-4. Non-creator clients never apply intents to canonical state. Their text and
-   drawing editors are local until the creator commits the intent.
-5. Canonical snapshots are accepted only when attributed to the creator session
-   embedded in that snapshot, and only when their creator incarnation and
-   revision are not older than the local canonical head.
-6. Peer gossip is a transport route. Relaying a creator snapshot or a client
-   intent does not grant authority to the relay.
+The room creator's tab is the server ("host"). Every other tab is a plain
+client that talks only to the host. There is no message relaying, no gossip,
+no multihop routing, and no host election of any kind:
 
-Cryptographic creator signatures would be required outside the trusted-party
-model. Name-only identity cannot provide adversarial authentication.
+- The host owns the canonical `RoomState`, applies every action serially,
+  and is the only writer.
+- Clients render host-authored state only. Text and drawing editors are
+  local until the host confirms them.
+- Trystero (Nostr signaling + WebRTC data channels) provides peer discovery
+  and pairwise links; the game uses it as a star, ignoring client-to-client
+  edges.
 
-## State machines
+## Wire protocol (v3)
 
-### Creator
+Client to host:
 
-- **Serving:** validates intents, serially mutates state, publishes snapshots,
-  and returns receipts.
-- **Recovering:** after a creator refresh, waits for the previous heartbeat to
-  expire, gathers cached creator snapshots briefly, selects the highest
-  revision, creates a new creator session, and resumes with a deadline grace
-  period.
-- **Fenced:** a creator tab whose session no longer matches canonical state
-  cannot process intents, send heartbeats, or expose creator controls.
+- `hello` — presence + the client's current cursor; sent every second (every
+  300 ms while catching up). Doubles as the join request and the state
+  request: the host replies with a targeted `state` whenever the cursor is
+  stale or `wantState` is set.
+- `request` — a game action with a unique `requestId`. Retried with backoff
+  until acknowledged; the host deduplicates by `requestId` and replays the
+  original result for duplicates, so retries are exactly-once.
+- `ping` — clock sampling.
 
-### Client
+Host to client:
 
-- **Joining:** announces its name/session and requests creator state.
-- **Active:** renders creator state, sends intents, and reports its canonical
-  cursor.
-- **Queueing:** when the creator route is unavailable, keeps local editor state
-  and retries a bounded/coalesced intent queue with exponential backoff.
-- **Synchronizing:** adopts a creator snapshot and fast-forwards its
-  phase/stage/reveal view.
-- **Closed/removed:** terminal room states shown by the UI.
+- `state` — the full room state, stamped `(incarnation, seq, serverTime)`.
+  Broadcast immediately on every meaningful change; draft-only changes are
+  batched on a 400 ms timer.
+- `tick` — 1 Hz heartbeat with `(incarnation, seq, serverTime, deadline)`.
+  Drives host liveness, countdown sync, and staleness detection: a client
+  seeing a tick with a newer `seq` than its state requests a fresh state
+  immediately, so a lost broadcast is repaired within about one second.
+- `ack` — the result of a `request`, targeted at the sender.
+- `pong` — clock sampling reply.
 
-## Canonical revisions and cursors
+## Ordering and idempotence
 
-Every canonical mutation increments `revision`. A sync cursor contains:
+`incarnation` is the creator session's start stamp and strictly increases
+every time the host resumes. `seq` is the state revision within one
+incarnation. Clients order all host output by `(incarnation, seq)` and ignore
+anything not strictly newer, so duplicated, delayed, or reordered host
+messages can never move a client backwards.
 
-- creator ID and creator session incarnation;
-- revision;
-- room phase and round ID/number;
-- stage index;
-- reveal playbook index, page index, and completion state.
+Client requests are idempotent at the host through the `requestId` result
+cache, and drafts/submissions additionally carry per-candidate sequence
+numbers so an older retry can never overwrite newer content.
 
-The creator monitor distinguishes:
+## Timers
 
-- **On this page:** same creator session and phase/stage/reveal location;
-- **In sync:** on the same page and at the exact creator revision;
-- **Stale/disconnected:** no recent report or no current player presence.
+Only the host advances deadlines. Clients estimate the host clock offset from
+`ping`/`pong` round trips (the lowest-RTT sample in a sliding window wins,
+which bounds the error at half the best round trip); ticks seed the estimate
+before the first pong. Countdowns render from the host deadline plus that
+offset, so displayed timers agree across clients within roughly one second
+even under jitter, and a stage never advances early or late because of a
+client's local clock.
 
-## Write protocol
+## Host resume
 
-1. A client creates an immutable intent ID.
-2. Drafts and repeated submissions for the same stage are coalesced in a
-   bounded queue; controls remain distinct.
-3. The client sends and retries the intent with exponential backoff and jitter.
-4. Peers may relay the unchanged intent through the connected graph.
-5. Only the current creator session validates and applies it.
-6. The creator stores the result for that intent ID. Duplicate retries receive
-   the same accepted/rejected receipt.
-7. The client removes the intent only after a creator-attributed receipt.
-8. Submissions and stage/control changes trigger immediate creator snapshots;
-   drafts are included in periodic snapshots to avoid broadcasting full drawing
-   state on every pointer or keystroke update.
+The host persists canonical state to `localStorage` on every change. If the
+host tab closes, rejoining the same room code with the same name from the
+same browser restores the room exactly where it left off:
 
-## Read and recovery protocol
+1. The app sees saved host state whose creator matches the joining name.
+2. It listens for ~2.5 s. If a live host answers, it joins as a regular
+   client instead (so a second tab cannot steal a healthy room).
+3. On silence it resumes hosting under a strictly newer incarnation, with a
+   20 s deadline grace so an in-flight stage is not instantly forfeited.
 
-- Creator mutations push snapshots.
-- Clients poll every 15 seconds.
-- Creator heartbeats carry a lightweight cursor; a newer cursor triggers an
-  immediate sync request.
-- Sync requests and responses may traverse bounded, deduplicated gossip.
-- Ordinary clients retrieve current state from the creator. Cached old-session
-  snapshots are used only to help the same creator recover after a refresh.
-- Creator recovery waits out the previous heartbeat, gathers candidate heads,
-  selects the highest revision, and fences the previous session by publishing a
-  new creator session.
-- A reconnecting client adopts the creator snapshot exactly; client-only
-  canonical mutations are never merged into it.
+If a stale host tab is still alive somewhere, it fences itself permanently
+the moment it hears a tick or state with a newer incarnation, and clients
+ignore its output by the ordering rule above.
 
-## Message and payload safeguards
+While the host is away, clients keep their local editors, queue submissions
+(newest per stage wins), show a "host connection interrupted" banner, and
+deliver the queue automatically when the host returns. Client refresh or
+rejoin by name reclaims the same seat and assignment.
 
-- Gossip messages have bounded IDs, TTL, count, and encoded size.
-- Duplicate message IDs are ignored; intent IDs have durable result semantics
-  for the lifetime of the creator tab.
-- Text length, stroke count, point count, pen/color indexes, coordinates, and
-  pressure are validated by the creator reducer.
-- Pending client intents are bounded and draft intents are coalesced.
-- Full snapshots remain potentially large; practical room/drawing size is
-  constrained by browser memory and WebRTC data-channel capacity even though
-  the game has no configured player maximum.
+## Payload safeguards
+
+The reducer validates text length, stroke/point counts, coordinates, color
+and pen indexes, timer ranges, and total encoded state size before accepting
+content; malformed or oversized wire messages are rejected by schema checks
+before processing. Pending client queues are bounded and coalesced.
 
 ## WebRTC and TURN
 
-Trystero uses Nostr only for peer discovery. It already configures several
-public STUN servers, but STUN cannot connect every NAT/firewall pair.
+Trystero uses Nostr relays only for discovery and ships public STUN servers.
+STUN cannot connect every NAT/firewall pair: a device that cannot form any
+direct link to the host needs a TURN relay or a different network, and the
+UI says so explicitly. Permanent TURN credentials must not be embedded in a
+static GitHub Pages bundle; production TURN support would require an external
+service issuing short-lived credentials.
 
-If one direct edge fails while both devices have other peer links, bounded
-gossip can still route client intents and creator snapshots through the graph.
-If a device cannot establish any peer link, no browser-only protocol can reach
-it. That network requires a TURN relay or a different network.
+## Testing
 
-Permanent TURN credentials must not be embedded in a GitHub Pages bundle.
-Production TURN support requires an external service that issues short-lived
-credentials. Until such a service is configured, the UI reports isolated
-devices clearly and keeps retrying.
-
-## Known durability boundary
-
-Creator snapshots are cached in browser storage and replicated to peers, but
-there is no backend quorum. A creator recovering on another device cannot prove
-that a hidden partition lacks a newer snapshot. The implementation chooses the
-highest cached revision it receives after the previous creator heartbeat
-expires. Server-grade durable consensus would require backend storage or a
-quorum protocol, both outside the static-site constraint.
-
-## Adversarial review outcomes
-
-The post-implementation adversarial review directly changed the design:
-
-- creator privilege now requires an exact creator session match, and ordinary
-  joins cannot replace an active creator;
-- creator recovery waits for the previous heartbeat to expire, gathers cached
-  heads, and resumes from the highest revision instead of the first response;
-- duplicate intents return their original result instead of being assumed
-  successful;
-- retry queues are bounded, drafts/submissions are coalesced, and retries use
-  exponential backoff with jitter;
-- creator reducer inputs enforce text, stroke, point, coordinate, and packet
-  bounds;
-- sync reports include player sessions, expire when stale/disconnected, and
-  distinguish “same page” from exact revision equality;
-- reveal completion is part of the cursor, and old creator sessions are fenced
-  from controls, heartbeats, and state publication;
-- dead election/failover paths and documentation were removed.
-
-The review also identified two limitations that cannot be honestly solved
-inside the current product constraints:
-
-1. Name-only identity and trusted JavaScript do not provide cryptographic
-   resistance to a deliberately modified client.
-2. A static bundle cannot safely contain permanent TURN credentials or prove
-   quorum durability after all creator/browser storage is lost.
+- `tests/engines.test.ts` drives the real host/client engines through a
+  deterministic virtual network with seeded packet loss (up to 45%), delay
+  jitter (up to one second), duplication, reordering, directional
+  partitions, and client clock skew. It covers convergence, exactly-once
+  submissions, deadline catch-up latency, offline queueing, host resume with
+  fencing of the stale host, and clock-offset accuracy, including a
+  multi-seed full-round soak.
+- `e2e/synchronization.spec.ts` repeats the key scenarios in real browsers
+  with a fault-injecting message channel: a full round on a lossy network,
+  cross-client countdown agreement, full-block recovery flagged by the host
+  monitor, and mid-round host close/resume.
+- `e2e/webrtc-live.spec.ts` exercises the production Trystero/WebRTC path.

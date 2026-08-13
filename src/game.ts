@@ -67,7 +67,7 @@ export function isValidSettings(settings: GameSettings): boolean {
 export function hydrateRoomState(state: RoomState): RoomState {
   return {
     ...state,
-    protocolVersion: 2,
+    protocolVersion: 3,
     blockedPlayerIds: state.blockedPlayerIds ?? [],
     closedAt: state.closedAt ?? null,
   }
@@ -90,58 +90,6 @@ export function syncCursorForState(state: RoomState): SyncCursor {
   }
 }
 
-export function isSyncCursorAhead(
-  remote: SyncCursor,
-  local: SyncCursor,
-): boolean {
-  if (remote.creatorId !== local.creatorId) return true
-  if (remote.creatorSessionStartedAt !== local.creatorSessionStartedAt) {
-    return remote.creatorSessionStartedAt > local.creatorSessionStartedAt
-  }
-  if (remote.creatorSessionId !== local.creatorSessionId) {
-    return remote.creatorSessionId > local.creatorSessionId
-  }
-  if (remote.revision !== local.revision) return remote.revision > local.revision
-  if (
-    remote.roundNumber !== local.roundNumber &&
-    remote.roundNumber !== null &&
-    local.roundNumber !== null
-  ) {
-    return remote.roundNumber > local.roundNumber
-  }
-  if (remote.roundId !== local.roundId) return true
-  if (
-    remote.stageIndex !== local.stageIndex &&
-    remote.stageIndex !== null &&
-    local.stageIndex !== null
-  ) {
-    return remote.stageIndex > local.stageIndex
-  }
-  if (
-    remote.revealBookIndex !== local.revealBookIndex &&
-    remote.revealBookIndex !== null &&
-    local.revealBookIndex !== null
-  ) {
-    return remote.revealBookIndex > local.revealBookIndex
-  }
-  return (
-    remote.revealPageIndex !== local.revealPageIndex &&
-    remote.revealPageIndex !== null &&
-    local.revealPageIndex !== null &&
-    remote.revealPageIndex > local.revealPageIndex
-  ) || (remote.revealComplete === true && local.revealComplete === false)
-}
-
-export function isCreatorAuthoritativeSnapshot(
-  state: RoomState,
-  senderId: PlayerId,
-  sessionId: string,
-): boolean {
-  return (
-    senderId === state.creatorId &&
-    sessionId === state.players[state.creatorId]?.sessionId
-  )
-}
 
 function copyState(state: RoomState): RoomState {
   return structuredClone(state)
@@ -206,7 +154,7 @@ export function createInitialRoom(
   }
 
   return {
-    protocolVersion: 2,
+    protocolVersion: 3,
     roomCode: normalizeRoomCode(roomCode),
     creatorId: creator.id,
     revision: 0,
@@ -384,11 +332,20 @@ function sameCandidateSession(
 }
 
 function isValidContent(content: Content): boolean {
-  if (content.kind === 'text') return content.text.length <= 280
+  if (!content || typeof content !== 'object') return false
+  if (content.kind === 'text') {
+    return typeof content.text === 'string' && content.text.length <= 280
+  }
+  if (content.kind !== 'drawing' || !Array.isArray(content.strokes)) {
+    return false
+  }
   if (content.strokes.length > 1_000) return false
   let pointCount = 0
   for (const stroke of content.strokes) {
     if (
+      !stroke ||
+      typeof stroke !== 'object' ||
+      typeof stroke.id !== 'string' ||
       stroke.id.length > 128 ||
       !Number.isInteger(stroke.color) ||
       stroke.color < 0 ||
@@ -396,6 +353,7 @@ function isValidContent(content: Content): boolean {
       !Number.isInteger(stroke.size) ||
       stroke.size < 0 ||
       stroke.size >= 8 ||
+      !Array.isArray(stroke.points) ||
       stroke.points.length > 5_000
     ) {
       return false
@@ -404,6 +362,8 @@ function isValidContent(content: Content): boolean {
     if (pointCount > 50_000) return false
     for (const point of stroke.points) {
       if (
+        !point ||
+        typeof point !== 'object' ||
         !Number.isFinite(point.x) ||
         !Number.isFinite(point.y) ||
         !Number.isFinite(point.pressure) ||
@@ -434,6 +394,9 @@ function applyCandidate(
     (intent.type !== 'draft' && intent.type !== 'submit') ||
     intent.roundId !== round.id ||
     intent.stageIndex !== round.stageIndex ||
+    !intent.candidate ||
+    typeof intent.candidate !== 'object' ||
+    !Number.isFinite(intent.candidate.seq) ||
     envelope.sessionId !== intent.candidate.sessionId ||
     !sameCandidateSession(state, envelope.senderId, intent.candidate) ||
     !isValidContent(intent.candidate.content)
@@ -790,35 +753,6 @@ export function closeRoom(state: RoomState, now: number): RoomState {
   next.closedAt = now
   next.revision += 1
   return next
-}
-
-export function adoptAuthoritativeSnapshot(
-  local: RoomState | null,
-  incoming: RoomState,
-): RoomState {
-  if (!local || local.roomCode !== incoming.roomCode) {
-    return structuredClone(incoming)
-  }
-  if (incoming.creatorId !== local.creatorId) return local
-  const incomingCreator = incoming.players[incoming.creatorId]
-  const localCreator = local.players[local.creatorId]
-  if (
-    incomingCreator.sessionStartedAt > localCreator.sessionStartedAt ||
-    (incomingCreator.sessionStartedAt === localCreator.sessionStartedAt &&
-      incomingCreator.sessionId > localCreator.sessionId)
-  ) {
-    return structuredClone(incoming)
-  }
-  if (
-    incomingCreator.sessionStartedAt < localCreator.sessionStartedAt ||
-    (incomingCreator.sessionStartedAt === localCreator.sessionStartedAt &&
-      incomingCreator.sessionId < localCreator.sessionId)
-  ) {
-    return local
-  }
-  return incoming.revision >= local.revision
-    ? structuredClone(incoming)
-    : local
 }
 
 export function getAssignment(

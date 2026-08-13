@@ -258,7 +258,7 @@ test('three players complete, reveal, and begin another round', async ({
   }
 })
 
-test('clients queue work until the creator reconnects as authority', async ({
+test('the host resumes from where it left off and queued work arrives', async ({
   context,
 }) => {
   const {host, bee, roomCode} = await createTrio(context, 3, 3)
@@ -270,27 +270,32 @@ test('clients queue work until the creator reconnects as authority', async ({
   await host.close()
   await bee
     .getByLabel(/Start this playbook/)
-    .fill('Queued while the creator was offline')
+    .fill('Queued while the host was offline')
   await bee.getByRole('button', {name: 'Submit prompt'}).click()
   await expect(
-    bee.getByText('Creator connection interrupted', {exact: false}),
+    bee.getByText('Host connection interrupted', {exact: false}),
   ).toBeVisible({timeout: 10_000})
   await expect(
     bee.getByRole('button', {name: 'Next stage'}),
   ).toHaveCount(0)
 
-  const returnedCreator = await joinRoom(
+  // Rejoining the same room code with the same name restores the room from
+  // this browser's saved host state, mid-round.
+  const returnedHost = await joinRoom(
     context,
     roomCode,
     'Host',
     'Write a secret prompt',
   )
   await expect(
-    returnedCreator.getByRole('button', {name: 'Next stage'}),
+    returnedHost.getByRole('button', {name: 'Next stage'}),
   ).toBeVisible()
-  await expect(returnedCreator.getByText(/1 of 3 submitted/)).toBeVisible({
+  await expect(returnedHost.getByText(/1 of 3 submitted/)).toBeVisible({
     timeout: 10_000,
   })
+  await expect(
+    bee.getByText('Host connection interrupted', {exact: false}),
+  ).toHaveCount(0)
 })
 
 test('a frozen player reclaims their assignment by name', async ({context}) => {
