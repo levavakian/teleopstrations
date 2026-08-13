@@ -195,6 +195,10 @@ class FakeTransport implements GameTransport {
     return {kind: this.kind, selfPeerId: this.selfPeerId, peers: []}
   }
 
+  signalingConnected(): boolean {
+    return !this.closed
+  }
+
   async close(): Promise<void> {
     this.closed = true
     this.listeners.clear()

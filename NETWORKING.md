@@ -139,14 +139,35 @@ and pen indexes, timer ranges, and total encoded state size before accepting
 content; malformed or oversized wire messages are rejected by schema checks
 before processing. Pending client queues are bounded and coalesced.
 
-## WebRTC and TURN
+## WebRTC, STUN, and TURN
 
-Trystero uses Nostr relays only for discovery and ships public STUN servers.
-STUN cannot connect every NAT/firewall pair: a device that cannot form any
-direct link to the host needs a TURN relay or a different network, and the
-UI says so explicitly. Permanent TURN credentials must not be embedded in a
-static GitHub Pages bundle; production TURN support would require an external
-service issuing short-lived credentials.
+Three different services are involved in connecting two browsers:
+
+- **Signaling (Nostr relays)** — how peers find each other and exchange
+  connection offers. Tiny text messages, so public relays run them for free.
+  Already built in.
+- **STUN** — tells a device its own public address so peers can attempt a
+  direct connection. Free public servers (Google, Cloudflare) are already
+  built in via Trystero.
+- **TURN** — a relay that carries *all* the game traffic when no direct
+  connection can form (strict corporate/carrier NATs). Because it relays
+  full bandwidth, no provider offers open credential-free TURN — the last
+  well-known one (Open Relay) retired its public static credentials and now
+  requires per-account, time-limited API credentials, which a static bundle
+  cannot hide.
+
+When nobody is found in a room, the UI now distinguishes the causes: if the
+discovery relays answer but no host does, the room simply is not live (the
+host can bring it back by rejoining with the same name); if the relays are
+unreachable, that network blocks them. Only when a peer is found but the
+WebRTC handshake fails is TURN actually the missing piece.
+
+For groups that really play across such networks, the app reads an optional
+TURN list from browser storage on each device (see `loadTurnServers` in
+`src/storage.ts`): obtain credentials from any provider (free tiers exist,
+for example Metered's) and set
+`localStorage['teleopstrations:v3:turn-servers']` to a JSON array of
+`{urls, username, credential}` entries before joining.
 
 ## Testing
 

@@ -1,3 +1,5 @@
+import type {TurnServerConfig} from '@trystero-p2p/nostr'
+
 import {hydrateRoomState, normalizeRoomCode, playerIdForName} from './game'
 import type {RoomState} from './types'
 
@@ -55,6 +57,37 @@ export function clearHostState(roomCode: string): void {
 export function canResumeAsHost(roomCode: string, name: string): boolean {
   const stored = loadHostState(roomCode)
   return stored !== null && stored.creatorId === playerIdForName(name)
+}
+
+const TURN_SERVERS_KEY = 'teleopstrations:v3:turn-servers'
+
+/**
+ * Optional TURN relay escape hatch. No provider offers open, credential-free
+ * TURN (relaying full traffic is too costly), so groups on restrictive
+ * networks can obtain their own credentials — for example the free tier of a
+ * provider like Metered — and paste them once per browser:
+ *
+ * localStorage.setItem('teleopstrations:v3:turn-servers', JSON.stringify([
+ *   {urls: 'turn:example.relay:443', username: '...', credential: '...'},
+ * ]))
+ */
+export function loadTurnServers(): TurnServerConfig[] | null {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(TURN_SERVERS_KEY) ?? 'null',
+    ) as unknown
+    if (!Array.isArray(parsed) || parsed.length === 0) return null
+    const servers = parsed.filter(
+      (entry): entry is TurnServerConfig =>
+        Boolean(entry) &&
+        typeof entry === 'object' &&
+        (typeof (entry as TurnServerConfig).urls === 'string' ||
+          Array.isArray((entry as TurnServerConfig).urls)),
+    )
+    return servers.length > 0 ? servers : null
+  } catch {
+    return null
+  }
 }
 
 const LAST_SESSION_KEY = 'teleopstrations:v3:last-session'
