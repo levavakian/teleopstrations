@@ -27,6 +27,32 @@ export function describeWebRtcJoinError(error: string): string {
   return `A WebRTC peer link failed: ${error}`
 }
 
+/**
+ * Extra STUN servers appended to Trystero's defaults (Google on 19302,
+ * Cloudflare on 3478). Chosen for provider and port diversity — a network
+ * that filters one provider or port often passes another — and each extra
+ * reflexive candidate is one more chance for hole punching to land.
+ * Verified reachable via scripts/probe-turn.mjs-style ICE gathering.
+ */
+const EXTRA_STUN_SERVERS: TurnServerConfig[] = [
+  {urls: 'stun:global.stun.twilio.com:3478'},
+  {urls: 'stun:stun.relay.metered.ca:80'},
+  {urls: 'stun:stun.nextcloud.com:443'},
+]
+
+/**
+ * True when a peer's RTCPeerConnection state says the link is beyond quick
+ * repair. 'disconnected' can technically self-heal, but combined with host
+ * silence it reliably means the path died (for example after a WiFi change).
+ */
+export function isDeadPeerLink(connectionState: string): boolean {
+  return (
+    connectionState === 'failed' ||
+    connectionState === 'disconnected' ||
+    connectionState === 'closed'
+  )
+}
+
 interface BroadcastEnvelope {
   senderPeerId: string
   targetPeerId: string | null
@@ -171,7 +197,9 @@ class TrysteroTransport extends BaseTransport {
         // deterministic selection keeps several healthy relays in common
         // across all players even when a few are unreachable.
         relayConfig: {redundancy: 10},
-        ...(turnConfig ? {turnConfig} : {}),
+        // Trystero appends this to its default STUN list; TURN servers are
+        // only present when the player configured them.
+        turnConfig: [...EXTRA_STUN_SERVERS, ...(turnConfig ?? [])],
       },
       `game-v3:${roomCode}`,
       {

@@ -770,6 +770,30 @@ describe('host/client engines under flaky networks', () => {
     expect(network.runUntil(() => converged(host, bee), 5_000)).toBe(true)
   })
 
+  it('remembers the host peer link through silence so the app can inspect it', () => {
+    const {network, clients} = createHarness(157, RELIABLE, ['Guest B'])
+    const [bee] = clients
+    expect(
+      network.runUntil(() => bee.lastHostPeerId === 'peer-host', 10_000),
+    ).toBe(true)
+
+    // Host silence flips liveness but must not forget which transport link
+    // carried host traffic — the fast-reconnect path inspects that link's
+    // connection state to decide how long to wait before rebuilding.
+    network.partition('peer-host', 'peer-guest b')
+    network.run(5_000)
+    expect(bee.hostOnline).toBe(false)
+    expect(bee.lastHostPeerId).toBe('peer-host')
+
+    // A rebuilt transport starts with no host link until a message arrives.
+    network.heal('peer-host', 'peer-guest b')
+    bee.attachTransport(new FakeTransport(network, 'peer-guest-b-next'))
+    expect(bee.lastHostPeerId).toBeNull()
+    expect(
+      network.runUntil(() => bee.lastHostPeerId === 'peer-host', 10_000),
+    ).toBe(true)
+  })
+
   it('keeps serving after the host device changes networks', () => {
     const {network, host, hostPlayer, hostTransport, clients} = createHarness(
       149,

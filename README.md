@@ -79,5 +79,10 @@ credential-free TURN (`scripts/probe-turn.mjs` verifies the well-known
 credentials from a provider such as Metered or ExpressTURN under "Connection
 help", and invite links copied from that device carry the settings to every
 player who opens them.
+To raise the odds without TURN, the app adds STUN servers across diverse
+providers and ports (80/443/3478) on top of the defaults, and clients rebuild
+their transport within seconds — instead of waiting out the silence window —
+when WebRTC itself reports the host link as dead, since every rebuild is a
+fresh hole-punching attempt.
 Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
 clears its round, while permanent deletion cannot exist without a server.

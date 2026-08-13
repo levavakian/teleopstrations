@@ -65,6 +65,12 @@ export class ClientEngine {
   private unsubscribe: () => void
 
   private hostPeerId: string | null = null
+  /**
+   * Unlike hostPeerId (cleared on silence so hellos go back to broadcast,
+   * letting a resumed host reappear under a new peer id), this survives
+   * host silence so the caller can inspect the old link's transport state.
+   */
+  private stickyHostPeerId: string | null = null
   private lastHostSeenAt = 0
   private adopted: {incarnation: number; seq: number} | null = null
   private readonly pending = new Map<string, PendingRequest>()
@@ -110,8 +116,14 @@ export class ClientEngine {
       this.handleMessage(message, peerId)
     })
     this.hostPeerId = null
+    this.stickyHostPeerId = null
     this.needState = true
     this.sendHello(this.now())
+  }
+
+  /** The peer id the last host message arrived from, if any. */
+  get lastHostPeerId(): string | null {
+    return this.stickyHostPeerId
   }
 
   get pendingRequestCount(): number {
@@ -319,6 +331,7 @@ export class ClientEngine {
 
   private markHostSeen(peerId: string, nowMs: number): void {
     this.hostPeerId = peerId
+    this.stickyHostPeerId = peerId
     this.lastHostSeenAt = nowMs
     if (!this.hostOnline) {
       this.hostOnline = true

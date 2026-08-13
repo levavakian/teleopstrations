@@ -4,6 +4,7 @@ import {
   ROOM_SILENT_MESSAGE,
   SIGNALING_BLOCKED_MESSAGE,
   describeWebRtcJoinError,
+  isDeadPeerLink,
   replaceTransport,
   type GameTransport,
 } from '../src/network'
@@ -32,6 +33,17 @@ describe('WebRTC connection guidance', () => {
     expect(describeWebRtcJoinError('something else')).toContain(
       'something else',
     )
+  })
+})
+
+describe('dead peer link detection', () => {
+  it('flags only states that will not quickly self-heal', () => {
+    expect(isDeadPeerLink('failed')).toBe(true)
+    expect(isDeadPeerLink('closed')).toBe(true)
+    expect(isDeadPeerLink('disconnected')).toBe(true)
+    expect(isDeadPeerLink('connected')).toBe(false)
+    expect(isDeadPeerLink('connecting')).toBe(false)
+    expect(isDeadPeerLink('new')).toBe(false)
   })
 })
 
