@@ -83,6 +83,8 @@ To raise the odds without TURN, the app adds STUN servers across diverse
 providers and ports (80/443/3478) on top of the defaults, and clients rebuild
 their transport within seconds — instead of waiting out the silence window —
 when WebRTC itself reports the host link as dead, since every rebuild is a
-fresh hole-punching attempt.
+fresh hole-punching attempt. Fruitless rebuilds back off exponentially:
+every rejoin bursts announce events to the signaling relays, and a client
+retrying a dead room forever would otherwise trip relay rate limits.
 Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
 clears its round, while permanent deletion cannot exist without a server.

@@ -21,6 +21,7 @@ import {
   parseTurnServers,
   saveTurnServersText,
 } from '../src/storage'
+import {hardReconnectWaitMs} from '../src/useGameRoom'
 
 describe('WebRTC connection guidance', () => {
   it('distinguishes a silent room from a blocked network', () => {
@@ -44,6 +45,21 @@ describe('dead peer link detection', () => {
     expect(isDeadPeerLink('connected')).toBe(false)
     expect(isDeadPeerLink('connecting')).toBe(false)
     expect(isDeadPeerLink('new')).toBe(false)
+  })
+})
+
+describe('hard reconnect scheduling', () => {
+  it('backs off fruitless retries to spare the signaling relays', () => {
+    expect(hardReconnectWaitMs(0, false)).toBe(12_000)
+    expect(hardReconnectWaitMs(1, false)).toBe(24_000)
+    expect(hardReconnectWaitMs(2, false)).toBe(48_000)
+    // Capped: a long host absence must not grow the wait unboundedly.
+    expect(hardReconnectWaitMs(9, false)).toBe(48_000)
+  })
+
+  it('stays fast when the transport confirmed the host link is dead', () => {
+    expect(hardReconnectWaitMs(0, true)).toBe(3_000)
+    expect(hardReconnectWaitMs(5, true)).toBe(3_000)
   })
 })
 
