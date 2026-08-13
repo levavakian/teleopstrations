@@ -24,12 +24,17 @@ async function installFaultInjector(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     const NativeBroadcastChannel = window.BroadcastChannel
     class FaultyBroadcastChannel {
-      readonly name: string
+      readonly name!: string
       onmessage: ((event: MessageEvent) => void) | null = null
       onmessageerror: ((event: MessageEvent) => void) | null = null
-      private readonly channel: BroadcastChannel
+      private readonly channel!: BroadcastChannel
 
       constructor(name: string) {
+        // The host lock is same-browser tab coordination, not network
+        // traffic, so it is exempt from injected network faults.
+        if (name.includes('hostlock')) {
+          return new NativeBroadcastChannel(name) as unknown as FaultyBroadcastChannel
+        }
         this.name = name
         this.channel = new NativeBroadcastChannel(name)
         this.channel.onmessage = (event) => {
@@ -300,6 +305,50 @@ test('a fully blocked client is flagged by the host and catches up in seconds', 
       fullPage: true,
     })
   }
+})
+
+test('a duplicate host tab cannot hijack a healthy room even with no network path', async ({
+  context,
+}) => {
+  const {host, roomCode} = await createRoom(context)
+  const bee = await joinRoom(context, roomCode, 'Guest B')
+  const cee = await joinRoom(context, roomCode, 'Guest C')
+  await expect(host.locator('.connection-pill')).toContainText('3 online', {
+    timeout: 15_000,
+  })
+  await host.getByRole('button', {name: /shuffle & start round/i}).click()
+  for (const page of [host, bee, cee]) {
+    await expect(
+      page.getByRole('heading', {name: 'Write a secret prompt'}),
+    ).toBeVisible()
+  }
+
+  // A second tab joins with the host's name while its game network is fully
+  // blocked, so the network probe hears nothing. The same-browser host lock
+  // must still stop it from resuming and fencing the healthy host.
+  const contender = await context.newPage()
+  await contender.goto(
+    `/?transport=broadcast#${new URLSearchParams({room: roomCode})}`,
+  )
+  await setFaults(contender, {blockAll: true})
+  await contender.getByLabel('Your name').fill('Host')
+  await contender.getByRole('button', {name: /join room/i}).click()
+
+  await contender.waitForTimeout(5_000)
+  await expect(host.getByRole('button', {name: 'Next stage'})).toBeVisible()
+  await expect(
+    host.getByText('hosted from another tab', {exact: false}),
+  ).toHaveCount(0)
+  await expect(
+    contender.getByRole('heading', {name: 'Write a secret prompt'}),
+  ).toHaveCount(0)
+
+  // The healthy host keeps serving the real players throughout.
+  host.once('dialog', (dialog) => dialog.accept())
+  await host.getByRole('button', {name: 'Next stage'}).click()
+  await expect(
+    bee.getByRole('heading', {name: 'Draw what you read'}),
+  ).toBeVisible({timeout: 10_000})
 })
 
 test('the host closes mid-round and resumes seamlessly on a flaky network', async ({

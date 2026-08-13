@@ -107,9 +107,25 @@ same browser restores the room exactly where it left off:
 3. On silence it resumes hosting under a strictly newer incarnation, with a
    20 s deadline grace so an in-flight stage is not instantly forfeited.
 
-If a stale host tab is still alive somewhere, it fences itself permanently
-the moment it hears a tick or state with a newer incarnation, and clients
-ignore its output by the ordering rule above.
+Because resume data lives in this browser's storage, a still-running
+legitimate host can only exist in another tab of the same browser. A
+dedicated same-browser channel therefore answers "is anyone hosting this
+room right now?" instantly during the probe, so a duplicate host-name tab
+reliably becomes a spectator instead of hijacking a healthy room — even
+before any network link forms. If a stale host tab still slips through, it
+fences itself permanently the moment it hears a tick or state with a newer
+incarnation, and clients ignore its output by the ordering rule above.
+
+## Multiple tabs and private windows
+
+Several tabs of one browser can each play a different person in the same
+room: every tab has its own session and peer identity, and storage keys are
+scoped so only the creator's name can resume the room. Opening the same
+player name twice hands the seat to the newest tab; the older tab drops to
+a "welcome back" screen and can never steal the seat back. Private/incognito
+windows behave like a separate browser profile: fine for playing, but host
+resume data lives only inside that private session and disappears when it
+ends.
 
 While the host is away, clients keep their local editors, queue submissions
 (newest per stage wins), show a "host connection interrupted" banner, and

@@ -162,6 +162,31 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       }
     }
 
+    // Same-browser host coordination. Host resume data lives in this
+    // browser's storage, so a still-running legitimate host can only exist
+    // in another tab of this browser. A dedicated channel answers "is
+    // anyone hosting this room right now?" instantly and reliably, keeping
+    // a duplicate host-name tab from hijacking a healthy room even before
+    // any network link forms.
+    const lockChannelName = `teleopstrations:v3:hostlock:${config.roomCode}`
+    let lockChannel: BroadcastChannel | null = null
+    let lockProbeChannel: BroadcastChannel | null = null
+
+    const holdHostLock = () => {
+      lockChannel?.close()
+      lockChannel = new BroadcastChannel(lockChannelName)
+      lockChannel.onmessage = (event: MessageEvent) => {
+        const engine = engineRef.current
+        if (
+          event.data === 'ping' &&
+          engine?.role === 'host' &&
+          !engine.host.fenced
+        ) {
+          lockChannel?.postMessage('alive')
+        }
+      }
+    }
+
     const startHost = (initialState: RoomState) => {
       if (disposed) return
       const host = new HostEngine({
@@ -173,6 +198,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         persist: saveHostState,
       })
       engineRef.current = {role: 'host', host}
+      holdHostLock()
       syncFromEngine()
     }
 
@@ -198,24 +224,38 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       if (!canResume) {
         startClient()
       } else {
-        // This browser hosted the room before. Listen briefly for a live
-        // host; if the room is silent, resume hosting from the saved state.
+        // This browser hosted the room before. Ask other tabs of this
+        // browser and listen briefly for a live host on the network; only
+        // if the room is silent everywhere, resume from the saved state.
+        const lockProbe = new BroadcastChannel(lockChannelName)
+        lockProbeChannel = lockProbe
+        const settleAsClient = () => {
+          lockProbe.close()
+          lockProbeChannel = null
+          unsubscribeProbe?.()
+          unsubscribeProbe = null
+          if (probeTimer !== null) {
+            window.clearTimeout(probeTimer)
+            probeTimer = null
+          }
+          startClient()
+        }
+        lockProbe.onmessage = (event: MessageEvent) => {
+          if (event.data === 'alive') settleAsClient()
+        }
+        lockProbe.postMessage('ping')
         unsubscribeProbe = transport.subscribe((message) => {
           if (
             isValidWireMessage(message, config.roomCode) &&
             isHostMessage(message)
           ) {
-            unsubscribeProbe?.()
-            unsubscribeProbe = null
-            if (probeTimer !== null) {
-              window.clearTimeout(probeTimer)
-              probeTimer = null
-            }
-            startClient()
+            settleAsClient()
           }
         })
         probeTimer = window.setTimeout(() => {
           probeTimer = null
+          lockProbe.close()
+          lockProbeChannel = null
           unsubscribeProbe?.()
           unsubscribeProbe = null
           startHost(reclaimCreatorSession(stored, config.player))
@@ -260,6 +300,8 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       if (probeTimer !== null) window.clearTimeout(probeTimer)
       if (pumpTimer !== null) window.clearInterval(pumpTimer)
       if (onlineTimer !== null) window.clearTimeout(onlineTimer)
+      lockChannel?.close()
+      lockProbeChannel?.close()
       unsubscribeProbe?.()
       unsubscribePeers?.()
       const engine = engineRef.current
