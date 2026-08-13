@@ -12,6 +12,7 @@ import {
   ROOM_SILENT_MESSAGE,
   SIGNALING_BLOCKED_MESSAGE,
   createTransport,
+  replaceTransport,
   type GameTransport,
 } from './network'
 import {isHostMessage, isValidWireMessage} from './protocol'
@@ -123,18 +124,31 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
      * Drops the current transport and joins the signaling room again. Used
      * when the peer link looks permanently dead (for example after a
      * network change) even though this tab is healthy; engines keep their
-     * state and queued work across the swap.
+     * state and queued work across the swap. The swap is strictly
+     * sequential (close, then join) and never overlaps itself.
      */
+    let reconnectInFlight = false
     const hardReconnect = () => {
-      if (disposed || !engineRef.current) return
+      if (disposed || !engineRef.current || reconnectInFlight) return
+      reconnectInFlight = true
       const stale = transport
-      transport = newTransport()
-      transportRef.current = transport
-      bindPeers(transport)
-      const engine = engineRef.current
-      if (engine.role === 'host') engine.host.attachTransport(transport)
-      else engine.client.attachTransport(transport)
-      void stale.close()
+      replaceTransport(stale, newTransport)
+        .then((fresh) => {
+          reconnectInFlight = false
+          if (disposed) {
+            void fresh.close()
+            return
+          }
+          transport = fresh
+          transportRef.current = fresh
+          bindPeers(fresh)
+          const engine = engineRef.current
+          if (engine?.role === 'host') engine.host.attachTransport(fresh)
+          else if (engine?.role === 'client') engine.client.attachTransport(fresh)
+        })
+        .catch(() => {
+          reconnectInFlight = false
+        })
     }
 
     const onBrowserOnline = () => {

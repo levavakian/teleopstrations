@@ -23,7 +23,9 @@ import {
 } from './game'
 import {
   loadLastSession,
+  loadTurnServersText,
   rememberLastSession,
+  saveTurnServersText,
   type RememberedSession,
 } from './storage'
 import type {
@@ -292,8 +294,74 @@ function Landing({
           <span aria-hidden="true">↔</span>
           No account or game server. Your game travels peer-to-peer.
         </p>
+
+        <ConnectionHelp />
       </section>
     </main>
+  )
+}
+
+function ConnectionHelp() {
+  const [turnText, setTurnText] = useState(() => loadTurnServersText())
+  const [status, setStatus] = useState('')
+
+  return (
+    <details className="connection-help">
+      <summary>Connection help</summary>
+      <p>
+        Players discover each other through public relays and then connect
+        directly. If someone repeatedly sees “a direct connection could not
+        form”, their network blocks direct links (VPNs and routers with
+        client/AP isolation are common causes). A TURN relay bridges those
+        networks: get free credentials from a provider such as{' '}
+        <a
+          href="https://www.metered.ca/tools/openrelay/"
+          rel="noreferrer"
+          target="_blank"
+        >
+          Metered Open Relay
+        </a>{' '}
+        and paste the <code>iceServers</code> JSON below on the affected
+        device before joining.
+      </p>
+      <label>
+        TURN servers (JSON array)
+        <textarea
+          rows={5}
+          spellCheck={false}
+          placeholder='[{"urls": "turn:relay.example.com:443", "username": "…", "credential": "…"}]'
+          value={turnText}
+          onChange={(event) => {
+            setTurnText(event.target.value)
+            setStatus('')
+          }}
+        />
+      </label>
+      <div className="connection-help__actions">
+        <span className="connection-help__status" role="status">
+          {status}
+        </span>
+        <button
+          className="button button--quiet"
+          type="button"
+          onClick={() => {
+            const result = saveTurnServersText(turnText)
+            if (result === 'invalid') {
+              setStatus('That is not a valid TURN server list.')
+              return
+            }
+            setTurnText(loadTurnServersText())
+            setStatus(
+              result === 'saved'
+                ? 'Saved. It will be used for new connections on this device.'
+                : 'Cleared. Direct connections only.',
+            )
+          }}
+        >
+          Save TURN settings
+        </button>
+      </div>
+    </details>
   )
 }
 
