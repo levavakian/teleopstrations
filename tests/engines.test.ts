@@ -160,6 +160,7 @@ class FakeTransport implements GameTransport {
   readonly kind = 'broadcast' as const
   readonly selfPeerId: string
   private readonly network: VirtualNetwork
+  private closed = false
   private readonly listeners = new Set<
     (message: WireMessage, peerId: string) => void
   >()
@@ -171,6 +172,7 @@ class FakeTransport implements GameTransport {
   }
 
   async send(message: WireMessage, targetPeerId?: string): Promise<void> {
+    if (this.closed) return
     this.network.send(this.selfPeerId, message, targetPeerId)
   }
 
@@ -194,6 +196,7 @@ class FakeTransport implements GameTransport {
   }
 
   async close(): Promise<void> {
+    this.closed = true
     this.listeners.clear()
     this.network.unregister(this.selfPeerId)
   }
@@ -213,8 +216,10 @@ interface Harness {
   host: HostEngine
   hostPlayer: PlayerSession
   hostStore: {state: RoomState | null}
+  hostTransport: FakeTransport
   clients: ClientEngine[]
   clientPlayers: PlayerSession[]
+  clientTransports: FakeTransport[]
 }
 
 function createHarness(
@@ -226,8 +231,9 @@ function createHarness(
   const network = new VirtualNetwork(seed, faults)
   const hostPlayer = makePlayer('Host', 1_000)
   const hostStore: {state: RoomState | null} = {state: null}
+  const hostTransport = new FakeTransport(network, 'peer-host')
   const host = new HostEngine({
-    transport: new FakeTransport(network, 'peer-host'),
+    transport: hostTransport,
     roomCode: ROOM_CODE,
     player: hostPlayer,
     initialState: createInitialRoom(ROOM_CODE, hostPlayer, {
@@ -243,10 +249,13 @@ function createHarness(
   network.addPump((now) => host.pump(now))
 
   const clientPlayers = clientNames.map((name) => makePlayer(name, 1_000))
+  const clientTransports: FakeTransport[] = []
   const clients = clientPlayers.map((player, index) => {
     const skew = clientSkews[index] ?? 0
+    const transport = new FakeTransport(network, `peer-${player.id}`)
+    clientTransports.push(transport)
     const client = new ClientEngine({
-      transport: new FakeTransport(network, `peer-${player.id}`),
+      transport,
       roomCode: ROOM_CODE,
       player,
       onChange: () => {},
@@ -257,7 +266,16 @@ function createHarness(
     return client
   })
 
-  return {network, host, hostPlayer, hostStore, clients, clientPlayers}
+  return {
+    network,
+    host,
+    hostPlayer,
+    hostStore,
+    hostTransport,
+    clients,
+    clientPlayers,
+    clientTransports,
+  }
 }
 
 function converged(host: HostEngine, client: ClientEngine): boolean {
@@ -673,6 +691,132 @@ describe('host/client engines under flaky networks', () => {
       )
     network.run(3_000)
     expect(adoptedSession()).toBe(true)
+  })
+
+  it('never lets a stale tab steal a seat back from a newer session', () => {
+    const {network, host} = createHarness(163, RELIABLE, ['Guest B'])
+    network.runUntil(() => host.state.joinOrder.length === 2, 10_000)
+
+    // The same person opens a newer tab: it takes over the seat.
+    const newerTab = makePlayer('Guest B', 50_000)
+    const newerClient = new ClientEngine({
+      transport: new FakeTransport(network, 'peer-guest-b-newer'),
+      roomCode: ROOM_CODE,
+      player: newerTab,
+      onChange: () => {},
+      now: () => network.now,
+      random: makeRng(999),
+    })
+    network.addPump((now) => newerClient.pump(now))
+    expect(
+      network.runUntil(
+        () =>
+          host.state.players[newerTab.id]?.sessionId === newerTab.sessionId,
+        10_000,
+      ),
+    ).toBe(true)
+
+    // The old tab keeps sending hellos for ten seconds; the seat must not
+    // flip back even once.
+    for (let step = 0; step < 100; step += 1) {
+      network.run(100)
+      expect(host.state.players[newerTab.id]?.sessionId).toBe(
+        newerTab.sessionId,
+      )
+    }
+  })
+
+  it('recovers after a client network change via transport replacement', () => {
+    const {network, host, hostPlayer, clients, clientPlayers, clientTransports} =
+      createHarness(139, RELIABLE, ['Guest B', 'Guest C'])
+    network.runUntil(() => host.state.joinOrder.length === 3, 10_000)
+    host.submitLocal({
+      id: createId(),
+      senderId: hostPlayer.id,
+      sessionId: hostPlayer.sessionId,
+      intent: {type: 'start-round', expectedPhase: 'lobby', previousRoundId: null},
+    })
+    network.runUntil(
+      () => clients.every((client) => client.state?.phase === 'stage'),
+      10_000,
+    )
+
+    // Guest B's device switches networks: the old peer link is dead. Work
+    // submitted while offline queues locally.
+    const [bee] = clients
+    const [beePlayer] = clientPlayers
+    void clientTransports[0].close()
+    submitViaClient(bee, beePlayer, {kind: 'text', text: 'From the new WiFi'}, 1)
+    network.run(5_000)
+    expect(bee.hostOnline).toBe(false)
+    expect(bee.pendingRequestCount).toBe(1)
+
+    // The app rebuilds the transport (hard reconnect): the engine keeps its
+    // state and queue, rejoins under a fresh peer link, and drains the queue.
+    bee.attachTransport(new FakeTransport(network, 'peer-guest-b-wifi2'))
+    expect(
+      network.runUntil(
+        () => bee.hostOnline && bee.pendingRequestCount === 0,
+        10_000,
+      ),
+    ).toBe(true)
+    expect(
+      host.state.round!.assignments[beePlayer.id].submission?.content,
+    ).toEqual({kind: 'text', text: 'From the new WiFi'})
+    expect(network.runUntil(() => converged(host, bee), 5_000)).toBe(true)
+  })
+
+  it('keeps serving after the host device changes networks', () => {
+    const {network, host, hostPlayer, hostTransport, clients} = createHarness(
+      149,
+      RELIABLE,
+      ['Guest B', 'Guest C'],
+    )
+    network.runUntil(() => host.state.joinOrder.length === 3, 10_000)
+    host.submitLocal({
+      id: createId(),
+      senderId: hostPlayer.id,
+      sessionId: hostPlayer.sessionId,
+      intent: {type: 'start-round', expectedPhase: 'lobby', previousRoundId: null},
+    })
+    network.runUntil(
+      () => clients.every((client) => client.state?.phase === 'stage'),
+      10_000,
+    )
+
+    // The host's device switches networks; every client sees it offline.
+    void hostTransport.close()
+    network.run(5_000)
+    expect(clients.every((client) => !client.hostOnline)).toBe(true)
+
+    // The host app rebuilds its transport; same session, same incarnation.
+    host.attachTransport(new FakeTransport(network, 'peer-host-wifi2'))
+    expect(
+      network.runUntil(
+        () => clients.every((client) => client.hostOnline),
+        10_000,
+      ),
+    ).toBe(true)
+
+    // Targeted replies flow over the relearned links: a client request is
+    // acknowledged and applied.
+    const round = host.state.round!
+    host.submitLocal({
+      id: createId(),
+      senderId: hostPlayer.id,
+      sessionId: hostPlayer.sessionId,
+      intent: {
+        type: 'force-advance',
+        roundId: round.id,
+        stageIndex: round.stageIndex,
+      },
+    })
+    expect(
+      network.runUntil(
+        () => clients.every((client) => converged(host, client)),
+        10_000,
+      ),
+    ).toBe(true)
   })
 
   it('keeps every client on the host page across ten flaky stage jumps', () => {

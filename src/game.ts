@@ -252,7 +252,10 @@ export function reclaimPlayerSession(
   const player = next.players[session.id]
   player.name = session.name
   player.sessionId = session.sessionId
-  player.sessionStartedAt += 1
+  player.sessionStartedAt = Math.max(
+    session.sessionStartedAt,
+    player.sessionStartedAt + 1,
+  )
   player.connected = true
   const assignment = next.round?.assignments[session.id]
   if (assignment?.draft) {

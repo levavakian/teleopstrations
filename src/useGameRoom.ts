@@ -30,6 +30,11 @@ import type {
 const ENGINE_PUMP_INTERVAL_MS = 100
 const HOST_PROBE_TIMEOUT_MS = 2_500
 const ISOLATED_PEER_WARNING_MS = 15_000
+/**
+ * If the host stays unreachable this long, the transport itself is suspect
+ * (a network change can strand WebRTC links); rejoin the signaling room.
+ */
+const HARD_RECONNECT_INTERVAL_MS = 12_000
 
 const EMPTY_TRANSPORT: TransportSnapshot = {
   kind: 'webrtc',
@@ -77,30 +82,68 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     let disposed = false
     let probeTimer: number | null = null
     let pumpTimer: number | null = null
+    let onlineTimer: number | null = null
     let unsubscribeProbe: (() => void) | null = null
+    let unsubscribePeers: (() => void) | null = null
+    let hostUnreachableSince: number | null = null
     const startedAt = Date.now()
 
-    const transport = createTransport(
-      config.transportKind ?? 'webrtc',
-      config.roomCode,
-      (message) => {
-        if (!disposed) setError(message)
-      },
-    )
-    transportRef.current = transport
+    const newTransport = () =>
+      createTransport(
+        config.transportKind ?? 'webrtc',
+        config.roomCode,
+        (message) => {
+          if (!disposed) setError(message)
+        },
+      )
 
-    const unsubscribePeers = transport.subscribePeers((snapshot) => {
-      if (disposed) return
-      setTransportSnapshot(snapshot)
-      if (snapshot.peers.length > 0) {
-        setError((current) =>
-          current === TURN_ISOLATION_MESSAGE ||
-          current?.startsWith('A direct WebRTC link')
-            ? null
-            : current,
-        )
-      }
-    })
+    const bindPeers = (transport: GameTransport) => {
+      unsubscribePeers?.()
+      unsubscribePeers = transport.subscribePeers((snapshot) => {
+        if (disposed) return
+        setTransportSnapshot(snapshot)
+        if (snapshot.peers.length > 0) {
+          setError((current) =>
+            current === TURN_ISOLATION_MESSAGE ||
+            current?.startsWith('A direct WebRTC link')
+              ? null
+              : current,
+          )
+        }
+      })
+    }
+
+    let transport = newTransport()
+    transportRef.current = transport
+    bindPeers(transport)
+
+    /**
+     * Drops the current transport and joins the signaling room again. Used
+     * when the peer link looks permanently dead (for example after a
+     * network change) even though this tab is healthy; engines keep their
+     * state and queued work across the swap.
+     */
+    const hardReconnect = () => {
+      if (disposed || !engineRef.current) return
+      const stale = transport
+      transport = newTransport()
+      transportRef.current = transport
+      bindPeers(transport)
+      const engine = engineRef.current
+      if (engine.role === 'host') engine.host.attachTransport(transport)
+      else engine.client.attachTransport(transport)
+      void stale.close()
+    }
+
+    const onBrowserOnline = () => {
+      // Give the new network a moment to settle, then rebuild peer links.
+      if (disposed || onlineTimer !== null) return
+      onlineTimer = window.setTimeout(() => {
+        onlineTimer = null
+        hardReconnect()
+      }, 1_500)
+    }
+    window.addEventListener('online', onBrowserOnline)
 
     const syncFromEngine = () => {
       if (disposed) return
@@ -189,6 +232,17 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
       } else if (engine?.role === 'client') {
         engine.client.pump(now)
         syncFromEngine()
+        // If the host stays unreachable, assume the peer link died (for
+        // example after a WiFi change) and rebuild it from scratch.
+        if (engine.client.state && !engine.client.hostOnline) {
+          hostUnreachableSince ??= now
+          if (now - hostUnreachableSince >= HARD_RECONNECT_INTERVAL_MS) {
+            hostUnreachableSince = now
+            hardReconnect()
+          }
+        } else {
+          hostUnreachableSince = null
+        }
       }
       if (
         config.mode === 'join' &&
@@ -202,10 +256,12 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
 
     return () => {
       disposed = true
+      window.removeEventListener('online', onBrowserOnline)
       if (probeTimer !== null) window.clearTimeout(probeTimer)
       if (pumpTimer !== null) window.clearInterval(pumpTimer)
+      if (onlineTimer !== null) window.clearTimeout(onlineTimer)
       unsubscribeProbe?.()
-      unsubscribePeers()
+      unsubscribePeers?.()
       const engine = engineRef.current
       engineRef.current = null
       if (engine?.role === 'host') engine.host.stop()

@@ -74,13 +74,13 @@ export class HostEngine {
   fenced = false
   syncReports: Record<string, PeerSyncReport> = {}
 
-  private readonly transport: GameTransport
+  private transport: GameTransport
   private readonly roomCode: string
   private readonly player: PlayerSession
   private readonly onChange: () => void
   private readonly persistState?: (state: RoomState) => void
   private readonly now: () => number
-  private readonly unsubscribe: () => void
+  private unsubscribe: () => void
 
   private readonly lastSeenByPlayer = new Map<string, number>()
   private readonly peerByPlayer = new Map<string, string>()
@@ -109,6 +109,22 @@ export class HostEngine {
     if (this.stopped) return
     this.stopped = true
     this.unsubscribe()
+  }
+
+  /**
+   * Swaps in a fresh transport after a hard reconnect (for example, the
+   * host's device changed networks). Canonical state is untouched; clients
+   * relearn the host's peer link from the immediate state broadcast.
+   */
+  attachTransport(transport: GameTransport): void {
+    if (this.stopped) return
+    this.unsubscribe()
+    this.transport = transport
+    this.unsubscribe = transport.subscribe((message, peerId) => {
+      this.handleMessage(message, peerId)
+    })
+    this.peerByPlayer.clear()
+    if (!this.fenced) this.broadcastState()
   }
 
   get incarnation(): number {
@@ -238,10 +254,18 @@ export class HostEngine {
         const next = setPlayerConnected(this.state, player.id, true)
         if (next !== this.state) this.publish(next, 'now')
       } else if (known) {
-        const next = reclaimPlayerSession(this.state, player)
-        if (next !== this.state) {
-          this.lastSeenByPlayer.set(player.id, nowMs)
-          this.publish(next, 'now')
+        // Only a strictly newer session may take over a seat, so a stale
+        // tab's hellos can never steal the seat back from a reclaimed one.
+        const incomingIsNewer =
+          player.sessionStartedAt > known.sessionStartedAt ||
+          (player.sessionStartedAt === known.sessionStartedAt &&
+            player.sessionId > known.sessionId)
+        if (incomingIsNewer) {
+          const next = reclaimPlayerSession(this.state, player)
+          if (next !== this.state) {
+            this.lastSeenByPlayer.set(player.id, nowMs)
+            this.publish(next, 'now')
+          }
         }
       } else {
         const next = joinPlayer(this.state, player)

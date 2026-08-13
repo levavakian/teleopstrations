@@ -275,6 +275,11 @@ test('a fully blocked client is flagged by the host and catches up in seconds', 
     })
   }
 
+  // Stay blocked long enough that the client performs at least one hard
+  // transport reconnect (as after a network change), proving recovery works
+  // across a rebuilt connection, not just a healed one.
+  await cee.waitForTimeout(14_000)
+
   // Connectivity returns: the client fast-forwards within a few seconds.
   await setFaults(cee, {})
   await expect(

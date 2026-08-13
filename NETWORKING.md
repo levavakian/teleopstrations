@@ -72,6 +72,29 @@ offset, so displayed timers agree across clients within roughly one second
 even under jitter, and a stage never advances early or late because of a
 client's local clock.
 
+## Network changes and reconnection
+
+Robustness to changing networks is layered:
+
+1. **Transport self-repair.** Trystero's Nostr signaling sockets reconnect
+   automatically with backoff, rooms keep announcing, and broken WebRTC
+   peers are dropped and re-paired. Peer identity is per-tab, so a
+   re-paired link continues the same session.
+2. **Session-level recovery.** The protocol never assumes a live
+   connection: hellos, ticks, request retries, and `(incarnation, seq)`
+   ordering make reconnection invisible to game state. Whatever happened
+   while unreachable is replayed or fast-forwarded on the next contact.
+3. **Hard reconnect fallback.** If a client can still not reach the host
+   after 12 s (for example, the device moved to a new network and the old
+   WebRTC path is stranded), the app tears down its transport and rejoins
+   the signaling room from scratch; engines keep their state and queued
+   work across the swap. The browser's `online` event triggers the same
+   rebuild immediately after connectivity returns. The host does the same
+   on `online`.
+
+The one unavoidable limit: if the *new* network blocks all direct WebRTC
+paths, only TURN could help (see below).
+
 ## Host resume
 
 The host persists canonical state to `localStorage` on every change. If the

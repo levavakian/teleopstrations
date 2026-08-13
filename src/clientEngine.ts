@@ -55,14 +55,14 @@ export class ClientEngine {
   /** Set when the host rejected a request; cleared on the next accepted state. */
   lastRejectionAt: number | null = null
 
-  private readonly transport: GameTransport
+  private transport: GameTransport
   private readonly roomCode: string
   private readonly player: PlayerSession
   private readonly onChange: () => void
   private readonly now: () => number
   private readonly createId: () => string
   private readonly random: () => number
-  private readonly unsubscribe: () => void
+  private unsubscribe: () => void
 
   private hostPeerId: string | null = null
   private lastHostSeenAt = 0
@@ -94,6 +94,24 @@ export class ClientEngine {
     if (this.stopped) return
     this.stopped = true
     this.unsubscribe()
+  }
+
+  /**
+   * Swaps in a fresh transport after a hard reconnect (for example, a
+   * network change that killed the old WebRTC links). Adopted state, queued
+   * requests, and clock samples all survive; the host link is re-learned
+   * from the next host message.
+   */
+  attachTransport(transport: GameTransport): void {
+    if (this.stopped) return
+    this.unsubscribe()
+    this.transport = transport
+    this.unsubscribe = transport.subscribe((message, peerId) => {
+      this.handleMessage(message, peerId)
+    })
+    this.hostPeerId = null
+    this.needState = true
+    this.sendHello(this.now())
   }
 
   get pendingRequestCount(): number {
