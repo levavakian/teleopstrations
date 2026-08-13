@@ -167,7 +167,10 @@ class TrysteroTransport extends BaseTransport {
     this.room = joinRoom(
       {
         appId: 'io.github.levavakian.teleopstrations.v3',
-        relayConfig: {redundancy: 5},
+        // Trystero's default relay pool contains some dead entries; a wider
+        // deterministic selection keeps several healthy relays in common
+        // across all players even when a few are unreachable.
+        relayConfig: {redundancy: 10},
         ...(turnConfig ? {turnConfig} : {}),
       },
       `game-v3:${roomCode}`,
@@ -234,4 +237,24 @@ export function createTransport(
   return kind === 'broadcast'
     ? new BroadcastTransport(roomCode)
     : new TrysteroTransport(roomCode, onError)
+}
+
+/**
+ * Replaces a transport during a hard reconnect. The old transport must be
+ * fully closed *before* the new one is created: Trystero caches the live
+ * room per room ID, so joining again too early would adopt the old room and
+ * the pending leave would then destroy it out from under the replacement.
+ */
+export async function replaceTransport(
+  stale: GameTransport,
+  create: () => GameTransport,
+): Promise<GameTransport> {
+  try {
+    await stale.close()
+  } catch {
+    // A rejected leave means the old room was never torn down. Joining
+    // again then reuses the still-live cached room and simply rewires the
+    // message handlers onto it, which is safe.
+  }
+  return create()
 }

@@ -1,9 +1,11 @@
-import {describe, expect, it} from 'vitest'
+import {describe, expect, it, vi} from 'vitest'
 
 import {
   ROOM_SILENT_MESSAGE,
   SIGNALING_BLOCKED_MESSAGE,
   describeWebRtcJoinError,
+  replaceTransport,
+  type GameTransport,
 } from '../src/network'
 import {
   PROTOCOL_VERSION,
@@ -22,6 +24,54 @@ describe('WebRTC connection guidance', () => {
     expect(describeWebRtcJoinError('something else')).toContain(
       'something else',
     )
+  })
+})
+
+describe('transport replacement ordering', () => {
+  const makeStale = (close: () => Promise<void>): GameTransport => ({
+    kind: 'webrtc',
+    selfPeerId: 'stale',
+    send: async () => {},
+    subscribe: () => () => {},
+    subscribePeers: () => () => {},
+    snapshot: () => ({kind: 'webrtc', selfPeerId: 'stale', peers: []}),
+    signalingConnected: () => false,
+    close,
+  })
+
+  it('creates the replacement only after the old transport fully closed', async () => {
+    let closed = false
+    let resolveClose!: () => void
+    const stale = makeStale(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClose = () => {
+            closed = true
+            resolve()
+          }
+        }),
+    )
+    const create = vi.fn(() => {
+      // The regression this guards against: joining the signaling room
+      // while the previous leave is still pending adopts a doomed room.
+      expect(closed).toBe(true)
+      return makeStale(async () => {})
+    })
+
+    const pending = replaceTransport(stale, create)
+    expect(create).not.toHaveBeenCalled()
+    resolveClose()
+    await pending
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('still creates the replacement when the old close rejects', async () => {
+    const stale = makeStale(async () => {
+      throw new Error('leave failed: peer channel already dead')
+    })
+    const create = vi.fn(() => makeStale(async () => {}))
+    await replaceTransport(stale, create)
+    expect(create).toHaveBeenCalledTimes(1)
   })
 })
 
