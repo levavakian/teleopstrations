@@ -22,7 +22,11 @@ import {
   syncCursorForState,
 } from './game'
 import {
+  adoptSharedTurnServers,
+  encodeTurnParam,
+  hasSharedTurnServers,
   loadLastSession,
+  loadTurnServers,
   loadTurnServersText,
   rememberLastSession,
   saveTurnServersText,
@@ -51,6 +55,17 @@ function transportFromUrl(): 'webrtc' | 'broadcast' {
 function roomFromUrl(): string {
   const params = new URLSearchParams(location.hash.slice(1))
   return normalizeRoomCode(params.get('room') ?? '')
+}
+
+/**
+ * Invite links may carry the sender's TURN relay settings; adopting them
+ * here — before any join happens — means one player's setup reaches the
+ * whole group with no manual steps on the other devices.
+ */
+function adoptTurnFromUrl(): boolean {
+  const params = new URLSearchParams(location.hash.slice(1))
+  const param = params.get('turn')
+  return param ? adoptSharedTurnServers(param) : false
 }
 
 function makePlayer(name: string): PlayerSession {
@@ -94,6 +109,7 @@ function Landing({
   onStart: (config: RoomSessionConfig) => void
 }) {
   const inviteCode = roomFromUrl()
+  const [turnAdopted] = useState(() => adoptTurnFromUrl())
   const [mode, setMode] = useState<'create' | 'join'>(
     inviteCode ? 'join' : 'create',
   )
@@ -295,37 +311,54 @@ function Landing({
           No account or game server. Your game travels peer-to-peer.
         </p>
 
-        <ConnectionHelp />
+        <ConnectionHelp turnAdopted={turnAdopted} />
       </section>
     </main>
   )
 }
 
-function ConnectionHelp() {
+function ConnectionHelp({turnAdopted = false}: {turnAdopted?: boolean}) {
   const [turnText, setTurnText] = useState(() => loadTurnServersText())
   const [status, setStatus] = useState('')
+  const [sharedActive, setSharedActive] = useState(() => hasSharedTurnServers())
 
   return (
-    <details className="connection-help">
+    <details className="connection-help" open={turnAdopted || undefined}>
       <summary>Connection help</summary>
       <p>
         Players discover each other through public relays and then connect
-        directly. If someone repeatedly sees “a direct connection could not
-        form”, their network blocks direct links (VPNs and routers with
-        client/AP isolation are common causes). A TURN relay bridges those
-        networks: get free credentials from a provider such as{' '}
+        directly. Whether a direct link forms depends on both networks
+        cooperating, so it can work one time and fail the next — VPNs, phone
+        carriers (their NAT is the worst case), and routers with client/AP
+        isolation are common causes. A TURN relay makes connections reliable
+        instead of luck-based.
+      </p>
+      <p>
+        Only one player needs to set it up: get free credentials from a
+        provider such as{' '}
         <a
-          href="https://www.metered.ca/tools/openrelay/"
+          href="https://www.metered.ca/stun-turn"
           rel="noreferrer"
           target="_blank"
         >
-          Metered Open Relay
+          Metered
         </a>{' '}
-        and paste the <code>iceServers</code> JSON below on the affected
-        device before joining.
+        or{' '}
+        <a href="https://www.expressturn.com/" rel="noreferrer" target="_blank">
+          ExpressTURN
+        </a>{' '}
+        (free tiers are plenty for drawings), paste the{' '}
+        <code>iceServers</code> JSON below, and share a fresh invite link.
+        Links copied on this device carry the relay settings to everyone who
+        opens them.
       </p>
+      {sharedActive ? (
+        <p className="connection-help__shared" role="status">
+          Relay settings from an invite link are active on this device.
+        </p>
+      ) : null}
       <label>
-        TURN servers (JSON array)
+        TURN servers (iceServers JSON)
         <textarea
           rows={5}
           spellCheck={false}
@@ -351,9 +384,10 @@ function ConnectionHelp() {
               return
             }
             setTurnText(loadTurnServersText())
+            setSharedActive(hasSharedTurnServers())
             setStatus(
               result === 'saved'
-                ? 'Saved. It will be used for new connections on this device.'
+                ? 'Saved. New connections and copied invite links will use it.'
                 : 'Cleared. Direct connections only.',
             )
           }}
@@ -496,7 +530,10 @@ function RoomHeader({
   const [copied, setCopied] = useState(false)
   const copyInvite = async () => {
     const url = new URL(location.href)
-    url.hash = new URLSearchParams({room: state.roomCode}).toString()
+    const params = new URLSearchParams({room: state.roomCode})
+    const turnServers = loadTurnServers()
+    if (turnServers) params.set('turn', encodeTurnParam(turnServers))
+    url.hash = params.toString()
     let didCopy: boolean
     try {
       await navigator.clipboard.writeText(url.href)

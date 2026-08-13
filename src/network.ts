@@ -22,9 +22,35 @@ export const SIGNALING_BLOCKED_MESSAGE =
 
 export function describeWebRtcJoinError(error: string): string {
   if (/turn|exchanging sdp|ice/i.test(error)) {
-    return 'Another player was found, but a direct connection could not form between your devices. Common causes: a VPN on either device, or a router with client/AP isolation (common on guest and mesh WiFi). A TURN relay fixes it — open “Connection help” on the home screen to add one — or try another network.'
+    return 'Another player was found, but a direct connection could not form between your devices. Direct links depend on both networks cooperating, so they can work one moment and fail the next — VPNs, phone carriers, and routers with client/AP isolation are common causes. A TURN relay makes it reliable: one player adds one under “Connection help” on the home screen, then shares a fresh invite link — the link carries the relay settings to everyone who opens it.'
   }
   return `A WebRTC peer link failed: ${error}`
+}
+
+/**
+ * Extra STUN servers appended to Trystero's defaults (Google on 19302,
+ * Cloudflare on 3478). Chosen for provider and port diversity — a network
+ * that filters one provider or port often passes another — and each extra
+ * reflexive candidate is one more chance for hole punching to land.
+ * Verified reachable via scripts/probe-turn.mjs-style ICE gathering.
+ */
+const EXTRA_STUN_SERVERS: TurnServerConfig[] = [
+  {urls: 'stun:global.stun.twilio.com:3478'},
+  {urls: 'stun:stun.relay.metered.ca:80'},
+  {urls: 'stun:stun.nextcloud.com:443'},
+]
+
+/**
+ * True when a peer's RTCPeerConnection state says the link is beyond quick
+ * repair. 'disconnected' can technically self-heal, but combined with host
+ * silence it reliably means the path died (for example after a WiFi change).
+ */
+export function isDeadPeerLink(connectionState: string): boolean {
+  return (
+    connectionState === 'failed' ||
+    connectionState === 'disconnected' ||
+    connectionState === 'closed'
+  )
 }
 
 interface BroadcastEnvelope {
@@ -171,7 +197,9 @@ class TrysteroTransport extends BaseTransport {
         // deterministic selection keeps several healthy relays in common
         // across all players even when a few are unreachable.
         relayConfig: {redundancy: 10},
-        ...(turnConfig ? {turnConfig} : {}),
+        // Trystero appends this to its default STUN list; TURN servers are
+        // only present when the player configured them.
+        turnConfig: [...EXTRA_STUN_SERVERS, ...(turnConfig ?? [])],
       },
       `game-v3:${roomCode}`,
       {

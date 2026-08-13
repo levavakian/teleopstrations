@@ -487,3 +487,47 @@ test('creator can kick between rounds, end early, and close the room', async ({
   }
   await demoPause(host, 1_500)
 })
+
+test('invite links carry TURN relay settings to devices that open them', async ({
+  browser,
+  context,
+}) => {
+  const relay = {
+    urls: 'turn:relay.example:443',
+    username: 'user',
+    credential: 'secret',
+  }
+
+  // One player saves TURN credentials under Connection help…
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  const settings = await context.newPage()
+  await settings.goto('/?transport=broadcast')
+  await settings.getByText('Connection help').click()
+  await settings
+    .getByLabel(/TURN servers/)
+    .fill(JSON.stringify({iceServers: [relay]}))
+  await settings.getByRole('button', {name: 'Save TURN settings'}).click()
+  await expect(settings.getByText(/^Saved\./)).toBeVisible()
+  await settings.close()
+
+  // …then hosts a room and copies the invite link from the header.
+  const {host} = await createRoom(context)
+  await host.locator('.room-code').click()
+  await expect(host.locator('.room-code')).toContainText('Invite copied!')
+  const inviteUrl = await host.evaluate(() => navigator.clipboard.readText())
+  expect(inviteUrl).toContain('turn=')
+
+  // A separate browser profile opening that link adopts the settings
+  // without touching any configuration.
+  const guestContext = await browser.newContext()
+  const guest = await guestContext.newPage()
+  await guest.goto(inviteUrl)
+  await expect(
+    guest.getByText('Relay settings from an invite link are active'),
+  ).toBeVisible()
+  const adopted = await guest.evaluate(() =>
+    localStorage.getItem('teleopstrations:v3:turn-servers:shared'),
+  )
+  expect(JSON.parse(adopted ?? 'null')).toEqual([relay])
+  await guestContext.close()
+})

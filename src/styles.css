@@ -413,6 +413,14 @@ textarea::placeholder {
   font-weight: 400;
 }
 
+.connection-help__shared {
+  padding: 0.45rem 0.6rem;
+  border-radius: 0.45rem;
+  background: rgba(94, 155, 106, 0.14);
+  color: #3c6b48;
+  font-weight: 600;
+}
+
 .connection-help__actions {
   display: flex;
   margin-top: 0.6rem;

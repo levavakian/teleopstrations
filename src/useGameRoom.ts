@@ -12,6 +12,7 @@ import {
   ROOM_SILENT_MESSAGE,
   SIGNALING_BLOCKED_MESSAGE,
   createTransport,
+  isDeadPeerLink,
   replaceTransport,
   type GameTransport,
 } from './network'
@@ -37,6 +38,13 @@ const ISOLATED_PEER_WARNING_MS = 15_000
  * (a network change can strand WebRTC links); rejoin the signaling room.
  */
 const HARD_RECONNECT_INTERVAL_MS = 12_000
+/**
+ * When the transport itself reports the host's peer link as dead, there is
+ * no reason to wait out the full silence window — rebuild almost
+ * immediately. Every rebuild is a fresh ICE attempt (a new hole-punching
+ * roll), so cutting dead time directly raises reconnection odds per minute.
+ */
+const DEAD_LINK_RECONNECT_MS = 3_000
 
 const EMPTY_TRANSPORT: TransportSnapshot = {
   kind: 'webrtc',
@@ -289,10 +297,23 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         engine.client.pump(now)
         syncFromEngine()
         // If the host stays unreachable, assume the peer link died (for
-        // example after a WiFi change) and rebuild it from scratch.
+        // example after a WiFi change) and rebuild it from scratch. When
+        // the transport confirms the link is dead, skip most of the wait;
+        // a merely silent host (closed tab, no live link to inspect) keeps
+        // the longer window to avoid pointless rebuild churn.
         if (engine.client.state && !engine.client.hostOnline) {
           hostUnreachableSince ??= now
-          if (now - hostUnreachableSince >= HARD_RECONNECT_INTERVAL_MS) {
+          const hostPeerId = engine.client.lastHostPeerId
+          const hostPeer = hostPeerId
+            ? transport
+                .snapshot()
+                .peers.find((peer) => peer.id === hostPeerId)
+            : undefined
+          const wait =
+            hostPeer && isDeadPeerLink(hostPeer.connectionState)
+              ? DEAD_LINK_RECONNECT_MS
+              : HARD_RECONNECT_INTERVAL_MS
+          if (now - hostUnreachableSince >= wait) {
             hostUnreachableSince = now
             hardReconnect()
           }
