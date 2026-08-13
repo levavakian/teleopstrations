@@ -14,6 +14,7 @@ import {loadTurnServers} from '../src/storage'
 describe('WebRTC connection guidance', () => {
   it('distinguishes a silent room from a blocked network', () => {
     expect(ROOM_SILENT_MESSAGE).toContain('host may be offline')
+    expect(ROOM_SILENT_MESSAGE).toContain('reload the page')
     expect(SIGNALING_BLOCKED_MESSAGE).toContain('discovery relays')
     expect(describeWebRtcJoinError('ICE negotiation failed')).toContain(
       'TURN relay',

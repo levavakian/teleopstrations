@@ -14,7 +14,7 @@ import type {TransportPeer, TransportSnapshot} from './types'
 
 /** Discovery works but nobody answered: the room is probably not live. */
 export const ROOM_SILENT_MESSAGE =
-  'No one was found in this room yet. The host may be offline or the room code mistyped — if the host closed their tab, they can rejoin with the same name and room code to bring the room back.'
+  'No one was found in this room yet. The host may be offline or the room code mistyped — if the host closed their tab, they can rejoin with the same name and room code to bring the room back. If the game was just updated, every player should reload the page so everyone runs the same version.'
 
 /** The signaling relays themselves are unreachable from this network. */
 export const SIGNALING_BLOCKED_MESSAGE =
