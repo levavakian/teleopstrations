@@ -1,20 +1,28 @@
 import {
+  getRelaySockets,
   joinRoom,
   selfId,
   type JsonValue,
   type MessageAction,
   type Room,
+  type TurnServerConfig,
 } from '@trystero-p2p/nostr'
 
+import {loadTurnServers} from './storage'
 import type {WireMessage} from './protocol'
 import type {TransportPeer, TransportSnapshot} from './types'
 
-export const TURN_ISOLATION_MESSAGE =
-  'No peer link could be established. This static deployment has no TURN relay, so restrictive school, office, mobile, or carrier networks may isolate this device. Try a different network.'
+/** Discovery works but nobody answered: the room is probably not live. */
+export const ROOM_SILENT_MESSAGE =
+  'No one was found in this room yet. The host may be offline or the room code mistyped — if the host closed their tab, they can rejoin with the same name and room code to bring the room back.'
+
+/** The signaling relays themselves are unreachable from this network. */
+export const SIGNALING_BLOCKED_MESSAGE =
+  'The peer discovery relays could not be reached, so this network may block them. Try a different network or connection.'
 
 export function describeWebRtcJoinError(error: string): string {
   if (/turn|exchanging sdp|ice/i.test(error)) {
-    return 'A direct WebRTC link to a player failed. A completely isolated device needs a TURN service or a different network.'
+    return 'Another player was found, but a direct connection could not form between your networks. A TURN relay would be needed for this pairing — see the room help — or try a different network.'
   }
   return `A WebRTC peer link failed: ${error}`
 }
@@ -32,6 +40,8 @@ export interface GameTransport {
   subscribe(listener: (message: WireMessage, peerId: string) => void): () => void
   subscribePeers(listener: (snapshot: TransportSnapshot) => void): () => void
   snapshot(): TransportSnapshot
+  /** Whether the peer-discovery layer itself is reachable right now. */
+  signalingConnected(): boolean
   close(): Promise<void>
 }
 
@@ -47,6 +57,7 @@ abstract class BaseTransport implements GameTransport {
 
   abstract send(message: WireMessage, targetPeerId?: string): Promise<void>
   abstract snapshot(): TransportSnapshot
+  abstract signalingConnected(): boolean
   abstract close(): Promise<void>
 
   subscribe(
@@ -129,6 +140,10 @@ class BroadcastTransport extends BaseTransport {
     }
   }
 
+  signalingConnected(): boolean {
+    return true
+  }
+
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
@@ -148,10 +163,12 @@ class TrysteroTransport extends BaseTransport {
 
   constructor(roomCode: string, onError: (message: string) => void) {
     super()
+    const turnConfig = loadTurnServers()
     this.room = joinRoom(
       {
         appId: 'io.github.levavakian.teleopstrations.v3',
         relayConfig: {redundancy: 5},
+        ...(turnConfig ? {turnConfig} : {}),
       },
       `game-v3:${roomCode}`,
       {
@@ -184,6 +201,17 @@ class TrysteroTransport extends BaseTransport {
     return {kind: this.kind, selfPeerId: this.selfPeerId, peers}
   }
 
+  signalingConnected(): boolean {
+    try {
+      const sockets = getRelaySockets() as Record<string, WebSocket>
+      return Object.values(sockets).some(
+        (socket) => socket?.readyState === WebSocket.OPEN,
+      )
+    } catch {
+      return false
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
@@ -195,6 +223,8 @@ class TrysteroTransport extends BaseTransport {
     this.peerListeners.clear()
   }
 }
+
+export type {TurnServerConfig}
 
 export function createTransport(
   kind: 'webrtc' | 'broadcast',

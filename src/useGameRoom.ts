@@ -9,7 +9,8 @@ import {
 } from './game'
 import {HostEngine} from './hostEngine'
 import {
-  TURN_ISOLATION_MESSAGE,
+  ROOM_SILENT_MESSAGE,
+  SIGNALING_BLOCKED_MESSAGE,
   createTransport,
   type GameTransport,
 } from './network'
@@ -104,8 +105,9 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         setTransportSnapshot(snapshot)
         if (snapshot.peers.length > 0) {
           setError((current) =>
-            current === TURN_ISOLATION_MESSAGE ||
-            current?.startsWith('A direct WebRTC link')
+            current === ROOM_SILENT_MESSAGE ||
+            current === SIGNALING_BLOCKED_MESSAGE ||
+            current?.startsWith('Another player was found')
               ? null
               : current,
           )
@@ -290,7 +292,12 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         transport.snapshot().peers.length === 0 &&
         now - startedAt >= ISOLATED_PEER_WARNING_MS
       ) {
-        setError((current) => current ?? TURN_ISOLATION_MESSAGE)
+        // Diagnose why nobody is here: if the discovery relays answer, the
+        // room simply is not live; if they do not, this network blocks them.
+        const diagnosis = transport.signalingConnected()
+          ? ROOM_SILENT_MESSAGE
+          : SIGNALING_BLOCKED_MESSAGE
+        setError((current) => current ?? diagnosis)
       }
     }, ENGINE_PUMP_INTERVAL_MS)
 

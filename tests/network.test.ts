@@ -1,20 +1,48 @@
 import {describe, expect, it} from 'vitest'
 
 import {
-  TURN_ISOLATION_MESSAGE,
+  ROOM_SILENT_MESSAGE,
+  SIGNALING_BLOCKED_MESSAGE,
   describeWebRtcJoinError,
 } from '../src/network'
 import {
   PROTOCOL_VERSION,
   isValidWireMessage,
 } from '../src/protocol'
+import {loadTurnServers} from '../src/storage'
 
 describe('WebRTC connection guidance', () => {
-  it('explains the static deployment limitation for TURN-isolated peers', () => {
-    expect(TURN_ISOLATION_MESSAGE).toContain('no TURN relay')
+  it('distinguishes a silent room from a blocked network', () => {
+    expect(ROOM_SILENT_MESSAGE).toContain('host may be offline')
+    expect(SIGNALING_BLOCKED_MESSAGE).toContain('discovery relays')
     expect(describeWebRtcJoinError('ICE negotiation failed')).toContain(
-      'TURN service or a different network',
+      'TURN relay',
     )
+    expect(describeWebRtcJoinError('something else')).toContain(
+      'something else',
+    )
+  })
+})
+
+describe('optional TURN configuration', () => {
+  it('loads only well-formed TURN server entries', () => {
+    localStorage.removeItem('teleopstrations:v3:turn-servers')
+    expect(loadTurnServers()).toBeNull()
+
+    localStorage.setItem('teleopstrations:v3:turn-servers', 'not json')
+    expect(loadTurnServers()).toBeNull()
+
+    localStorage.setItem(
+      'teleopstrations:v3:turn-servers',
+      JSON.stringify([
+        {urls: 'turn:relay.example:443', username: 'u', credential: 'c'},
+        {bogus: true},
+      ]),
+    )
+    expect(loadTurnServers()).toEqual([
+      {urls: 'turn:relay.example:443', username: 'u', credential: 'c'},
+    ])
+    localStorage.removeItem('teleopstrations:v3:turn-servers')
   })
 })
 
