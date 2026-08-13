@@ -365,6 +365,66 @@ textarea::placeholder {
   font-size: 0.7rem;
 }
 
+.connection-help {
+  margin-top: 1.2rem;
+  padding: 0.85rem 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.6rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.connection-help summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #4c4a46;
+  font-weight: 700;
+}
+
+.connection-help p {
+  line-height: 1.55;
+}
+
+.connection-help a {
+  color: var(--blue);
+}
+
+.connection-help code {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.66rem;
+}
+
+.connection-help label {
+  display: grid;
+  color: #4c4a46;
+  font-weight: 700;
+  gap: 0.4rem;
+}
+
+.connection-help textarea {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  resize: vertical;
+  background: #fff;
+  color: var(--ink);
+  font-family: 'DM Mono', monospace;
+  font-size: 0.66rem;
+  font-weight: 400;
+}
+
+.connection-help__actions {
+  display: flex;
+  margin-top: 0.6rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.connection-help__status {
+  font-size: 0.66rem;
+}
+
 .privacy-note > span {
   display: grid;
   width: 1.5rem;

@@ -73,9 +73,15 @@ const TURN_SERVERS_KEY = 'teleopstrations:v3:turn-servers'
  */
 export function loadTurnServers(): TurnServerConfig[] | null {
   try {
-    const parsed = JSON.parse(
-      localStorage.getItem(TURN_SERVERS_KEY) ?? 'null',
-    ) as unknown
+    return parseTurnServers(localStorage.getItem(TURN_SERVERS_KEY) ?? '')
+  } catch {
+    return null
+  }
+}
+
+export function parseTurnServers(text: string): TurnServerConfig[] | null {
+  try {
+    const parsed = JSON.parse(text) as unknown
     if (!Array.isArray(parsed) || parsed.length === 0) return null
     const servers = parsed.filter(
       (entry): entry is TurnServerConfig =>
@@ -87,6 +93,33 @@ export function loadTurnServers(): TurnServerConfig[] | null {
     return servers.length > 0 ? servers : null
   } catch {
     return null
+  }
+}
+
+export function loadTurnServersText(): string {
+  try {
+    return localStorage.getItem(TURN_SERVERS_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** Saves pasted TURN JSON; returns how the input was handled. */
+export function saveTurnServersText(
+  text: string,
+): 'saved' | 'cleared' | 'invalid' {
+  const trimmed = text.trim()
+  try {
+    if (!trimmed) {
+      localStorage.removeItem(TURN_SERVERS_KEY)
+      return 'cleared'
+    }
+    const servers = parseTurnServers(trimmed)
+    if (!servers) return 'invalid'
+    localStorage.setItem(TURN_SERVERS_KEY, JSON.stringify(servers))
+    return 'saved'
+  } catch {
+    return 'invalid'
   }
 }
 

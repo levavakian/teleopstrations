@@ -22,7 +22,7 @@ export const SIGNALING_BLOCKED_MESSAGE =
 
 export function describeWebRtcJoinError(error: string): string {
   if (/turn|exchanging sdp|ice/i.test(error)) {
-    return 'Another player was found, but a direct connection could not form between your networks. A TURN relay would be needed for this pairing — see the room help — or try a different network.'
+    return 'Another player was found, but a direct connection could not form between your devices. Common causes: a VPN on either device, or a router with client/AP isolation (common on guest and mesh WiFi). A TURN relay fixes it — open “Connection help” on the home screen to add one — or try another network.'
   }
   return `A WebRTC peer link failed: ${error}`
 }

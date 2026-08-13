@@ -162,12 +162,19 @@ host can bring it back by rejoining with the same name); if the relays are
 unreachable, that network blocks them. Only when a peer is found but the
 WebRTC handshake fails is TURN actually the missing piece.
 
-For groups that really play across such networks, the app reads an optional
-TURN list from browser storage on each device (see `loadTurnServers` in
-`src/storage.ts`): obtain credentials from any provider (free tiers exist,
-for example Metered's) and set
-`localStorage['teleopstrations:v3:turn-servers']` to a JSON array of
-`{urls, username, credential}` entries before joining.
+For groups that really play across such networks, the landing page's
+"Connection help" panel accepts a pasted `iceServers` JSON array
+(`{urls, username, credential}` entries) on each affected device; obtain
+credentials from any provider (free tiers exist, for example Metered's).
+The list is stored per browser under
+`localStorage['teleopstrations:v3:turn-servers']` and passed to WebRTC on
+the next join.
+
+Note that "same WiFi" does not guarantee a direct path: routers with
+client/AP isolation (common on guest and mesh networks) block
+device-to-device traffic and the multicast DNS lookups that browsers use
+for LAN candidates, and a VPN on either device moves its traffic elsewhere
+entirely. Those setups need TURN just like strict corporate NATs do.
 
 ## Testing
 

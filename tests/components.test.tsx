@@ -39,6 +39,38 @@ describe('landing experience', () => {
   })
 })
 
+describe('connection help', () => {
+  it('saves, rejects, and clears pasted TURN settings', async () => {
+    const user = userEvent.setup()
+    localStorage.removeItem('teleopstrations:v3:turn-servers')
+    render(<App />)
+
+    await user.click(screen.getByText('Connection help'))
+    const textarea = screen.getByLabelText(/TURN servers/)
+
+    await user.click(textarea)
+    await user.paste('[{"urls": "turn:relay.example:443", "username": "u", "credential": "c"}]')
+    await user.click(screen.getByRole('button', {name: 'Save TURN settings'}))
+    expect(screen.getByText(/Saved\./)).toBeVisible()
+    expect(
+      JSON.parse(localStorage.getItem('teleopstrations:v3:turn-servers')!),
+    ).toEqual([
+      {urls: 'turn:relay.example:443', username: 'u', credential: 'c'},
+    ])
+
+    await user.clear(textarea)
+    await user.click(textarea)
+    await user.paste('nonsense')
+    await user.click(screen.getByRole('button', {name: 'Save TURN settings'}))
+    expect(screen.getByText(/not a valid TURN server list/)).toBeVisible()
+
+    await user.clear(textarea)
+    await user.click(screen.getByRole('button', {name: 'Save TURN settings'}))
+    expect(screen.getByText(/Cleared\./)).toBeVisible()
+    expect(localStorage.getItem('teleopstrations:v3:turn-servers')).toBeNull()
+  })
+})
+
 describe('drawing tools', () => {
   it('provides exactly 16 colors and 8 pen sizes', () => {
     render(<DrawingCanvas strokes={[]} onChange={vi.fn()} />)
