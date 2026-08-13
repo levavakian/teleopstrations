@@ -87,7 +87,7 @@ export interface RoundState {
 export type GamePhase = 'lobby' | 'stage' | 'reveal' | 'closed'
 
 export interface RoomState {
-  protocolVersion: 2
+  protocolVersion: number
   roomCode: string
   creatorId: PlayerId
   revision: number
@@ -187,71 +187,6 @@ export interface IntentEnvelope {
   sessionId: string
   intent: GameIntent
 }
-
-interface GossipMessage {
-  messageId: string
-  hopsRemaining: number
-}
-
-export type WireMessage =
-  | (GossipMessage & {
-      type: 'join'
-      player: PlayerSession
-      sentAt: number
-    })
-  | (GossipMessage & {
-      type: 'presence'
-      player: PlayerSession
-      sentAt: number
-    })
-  | (GossipMessage & {
-      type: 'heartbeat'
-      creatorId: PlayerId
-      senderId: PlayerId
-      sessionId: string
-      revision: number
-      cursor: SyncCursor
-      sentAt: number
-    })
-  | (GossipMessage & {
-      type: 'intent'
-      envelope: IntentEnvelope
-    })
-  | (GossipMessage & {
-      type: 'intent-ack'
-      senderId: PlayerId
-      sessionId: string
-      targetPlayerId: PlayerId
-      intentId: string
-      accepted: boolean
-      revision: number
-      sentAt: number
-    })
-  | (GossipMessage & {
-      type: 'snapshot'
-      senderId: PlayerId
-      sessionId: string
-      state: RoomState
-      reason: 'push' | 'periodic' | 'join' | 'sync-response'
-      sentAt: number
-    })
-  | (GossipMessage & {
-      type: 'sync-request'
-      roomCode: string
-      senderId: PlayerId
-      sessionId: string
-      cursor: SyncCursor | null
-      reason: 'join' | 'poll' | 'cursor-ahead'
-      sentAt: number
-    })
-  | (GossipMessage & {
-      type: 'sync-report'
-      roomCode: string
-      senderId: PlayerId
-      sessionId: string
-      cursor: SyncCursor
-      sentAt: number
-    })
 
 export interface TransportPeer {
   id: string

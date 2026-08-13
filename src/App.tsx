@@ -21,6 +21,11 @@ import {
   playerIdForName,
   syncCursorForState,
 } from './game'
+import {
+  loadLastSession,
+  rememberLastSession,
+  type RememberedSession,
+} from './storage'
 import type {
   Content,
   DrawingContent,
@@ -34,14 +39,6 @@ import type {
   TextContent,
 } from './types'
 import {useGameRoom} from './useGameRoom'
-
-const LAST_SESSION_KEY = 'teleopstrations:last-session'
-
-interface RememberedSession {
-  roomCode: string
-  name: string
-  transportKind: 'webrtc' | 'broadcast'
-}
 
 function transportFromUrl(): 'webrtc' | 'broadcast' {
   return new URLSearchParams(location.search).get('transport') === 'broadcast'
@@ -80,18 +77,7 @@ function rememberSession(config: RoomSessionConfig): void {
     name: config.player.name,
     transportKind: config.transportKind ?? 'webrtc',
   }
-  sessionStorage.setItem(LAST_SESSION_KEY, JSON.stringify(remembered))
-}
-
-function loadRememberedSession(): RememberedSession | null {
-  try {
-    const remembered = JSON.parse(
-      sessionStorage.getItem(LAST_SESSION_KEY) ?? 'null',
-    ) as RememberedSession | null
-    return remembered?.roomCode && remembered.name ? remembered : null
-  } catch {
-    return null
-  }
+  rememberLastSession(remembered)
 }
 
 function setInviteUrl(roomCode: string): void {
@@ -118,7 +104,7 @@ function Landing({
     String(DEFAULT_SETTINGS.drawingSeconds),
   )
   const [error, setError] = useState('')
-  const remembered = useMemo(() => loadRememberedSession(), [])
+  const remembered = useMemo(() => loadLastSession(), [])
   const transportKind = transportFromUrl()
 
   const start = (event: FormEvent) => {
@@ -1484,14 +1470,31 @@ function Room({
       ) : null}
       {!room.creatorConnected && !isCreatorAuthority(state, config) ? (
         <div className="network-warning network-warning--authority" role="status">
-          Creator connection interrupted. Your work is queued while this client
-          retries the creator and polls for current state.
+          Host connection interrupted. Your work is saved on this device and
+          resent automatically as soon as the host returns.
         </div>
       ) : null}
       {isCreatorAuthority(state, config) ? (
         <CreatorSyncStatus state={state} reports={room.syncReports} />
       ) : null}
-      {state.phase === 'closed' ? (
+      {room.fenced ? (
+        <main className="connection-page connection-page--in-room">
+          <div className="connection-card room-ended-card">
+            <span className="room-ended-card__icon" aria-hidden="true">
+              ⧉
+            </span>
+            <span className="step-label">Hosting moved</span>
+            <h1>This room is now hosted from another tab</h1>
+            <p>
+              A newer tab resumed hosting this room, so this tab stopped
+              serving to avoid conflicts. Close it and keep playing there.
+            </p>
+            <button className="button button--primary" type="button" onClick={exit}>
+              Back to home
+            </button>
+          </div>
+        </main>
+      ) : state.phase === 'closed' ? (
         <main className="connection-page connection-page--in-room">
           <div className="connection-card room-ended-card">
             <span className="room-ended-card__icon" aria-hidden="true">
