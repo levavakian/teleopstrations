@@ -326,16 +326,16 @@ function ConnectionHelp({turnAdopted = false}: {turnAdopted?: boolean}) {
     <details className="connection-help" open={turnAdopted || undefined}>
       <summary>Connection help</summary>
       <p>
-        Players discover each other through public relays and then connect
-        directly. Whether a direct link forms depends on both networks
-        cooperating, so it can work one time and fail the next — VPNs, phone
-        carriers (their NAT is the worst case), and routers with client/AP
-        isolation are common causes. A TURN relay makes connections reliable
-        instead of luck-based.
+        Players discover each other through public relays and connect
+        directly when possible; when their networks won’t cooperate (VPNs,
+        phone carriers, routers with client/AP isolation), traffic falls
+        back to a built-in TURN relay, so connections should normally just
+        work.
       </p>
       <p>
-        Only one player needs to set it up: get free credentials from a
-        provider such as{' '}
+        The built-in relay runs on a shared free monthly quota. If
+        connections start failing for everyone, it may be exhausted — get
+        your own free credentials from a provider such as{' '}
         <a
           href="https://www.metered.ca/stun-turn"
           rel="noreferrer"
@@ -346,11 +346,10 @@ function ConnectionHelp({turnAdopted = false}: {turnAdopted?: boolean}) {
         or{' '}
         <a href="https://www.expressturn.com/" rel="noreferrer" target="_blank">
           ExpressTURN
-        </a>{' '}
-        (free tiers are plenty for drawings), paste the{' '}
-        <code>iceServers</code> JSON below, and share a fresh invite link.
-        Links copied on this device carry the relay settings to everyone who
-        opens them.
+        </a>
+        , paste the <code>iceServers</code> JSON below, and share a fresh
+        invite link. Links copied on this device carry the relay settings to
+        everyone who opens them; only one player needs to do this.
       </p>
       {sharedActive ? (
         <p className="connection-help__shared" role="status">

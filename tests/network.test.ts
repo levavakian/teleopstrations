@@ -6,6 +6,7 @@ import {
   describeWebRtcJoinError,
   isDeadPeerLink,
   replaceTransport,
+  turnConfigForJoin,
   type GameTransport,
 } from '../src/network'
 import {
@@ -34,6 +35,49 @@ describe('WebRTC connection guidance', () => {
     expect(describeWebRtcJoinError('something else')).toContain(
       'something else',
     )
+  })
+})
+
+describe('ICE server assembly', () => {
+  const MANUAL_KEY = 'teleopstrations:v3:turn-servers'
+  const SHARED_KEY = 'teleopstrations:v3:turn-servers:shared'
+
+  it('always ships STUN diversity and the built-in TURN relay', () => {
+    localStorage.removeItem(MANUAL_KEY)
+    localStorage.removeItem(SHARED_KEY)
+    const servers = turnConfigForJoin()
+    const urlsOf = (entry: {urls: string | string[]}) =>
+      Array.isArray(entry.urls) ? entry.urls : [entry.urls]
+    expect(
+      servers.some((entry) => urlsOf(entry).some((url) => url.startsWith('stun:'))),
+    ).toBe(true)
+    const turnEntries = servers.filter((entry) =>
+      urlsOf(entry).some((url) => /^turns?:/.test(url)),
+    )
+    // UDP, TCP, and TLS variants so at least one slips through most networks.
+    expect(turnEntries.length).toBeGreaterThanOrEqual(4)
+    expect(
+      turnEntries.every((entry) => entry.username && entry.credential),
+    ).toBe(true)
+  })
+
+  it('appends player-configured servers and drops duplicates', () => {
+    localStorage.removeItem(SHARED_KEY)
+    const base = turnConfigForJoin()
+    const custom = {urls: 'turn:own.example:443', username: 'me', credential: 'pw'}
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([custom, base[0]]))
+
+    const merged = turnConfigForJoin()
+    expect(
+      merged.filter(
+        (entry) => JSON.stringify(entry) === JSON.stringify(base[0]),
+      ),
+    ).toHaveLength(1)
+    expect(
+      merged.some((entry) => JSON.stringify(entry) === JSON.stringify(custom)),
+    ).toBe(true)
+    expect(merged).toHaveLength(base.length + 1)
+    localStorage.removeItem(MANUAL_KEY)
   })
 })
 
