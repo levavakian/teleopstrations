@@ -46,6 +46,26 @@ const HARD_RECONNECT_INTERVAL_MS = 12_000
  */
 const DEAD_LINK_RECONNECT_MS = 3_000
 
+/**
+ * How long to wait before the next hard reconnect. Every rejoin publishes a
+ * burst of announce events to the signaling relays, so fruitless retries
+ * back off exponentially (12s, 24s, 48s cap) to keep a long host absence
+ * from tripping relay rate limits ("you note too much"). Backing off is
+ * safe: a returning host is discovered through the *existing* transport
+ * without any rebuild — hard reconnects only exist for the rare case where
+ * this client's own transport died silently. The dead-link fast path skips
+ * the wait because it cannot loop: it requires a live host link that the
+ * transport just watched fail, which can only happen again after the host
+ * was actually re-contacted (resetting the backoff).
+ */
+export function hardReconnectWaitMs(
+  fruitlessAttempts: number,
+  hostLinkDead: boolean,
+): number {
+  if (hostLinkDead) return DEAD_LINK_RECONNECT_MS
+  return HARD_RECONNECT_INTERVAL_MS * 2 ** Math.min(fruitlessAttempts, 2)
+}
+
 const EMPTY_TRANSPORT: TransportSnapshot = {
   kind: 'webrtc',
   selfPeerId: '',
@@ -96,6 +116,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     let unsubscribeProbe: (() => void) | null = null
     let unsubscribePeers: (() => void) | null = null
     let hostUnreachableSince: number | null = null
+    let reconnectAttempts = 0
     const startedAt = Date.now()
 
     const newTransport = () =>
@@ -300,7 +321,8 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         // example after a WiFi change) and rebuild it from scratch. When
         // the transport confirms the link is dead, skip most of the wait;
         // a merely silent host (closed tab, no live link to inspect) keeps
-        // the longer window to avoid pointless rebuild churn.
+        // the longer, exponentially backed-off window to avoid rebuild
+        // churn and signaling-relay rate limits.
         if (engine.client.state && !engine.client.hostOnline) {
           hostUnreachableSince ??= now
           const hostPeerId = engine.client.lastHostPeerId
@@ -309,16 +331,19 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
                 .snapshot()
                 .peers.find((peer) => peer.id === hostPeerId)
             : undefined
-          const wait =
-            hostPeer && isDeadPeerLink(hostPeer.connectionState)
-              ? DEAD_LINK_RECONNECT_MS
-              : HARD_RECONNECT_INTERVAL_MS
+          const wait = hardReconnectWaitMs(
+            reconnectAttempts,
+            hostPeer !== undefined &&
+              isDeadPeerLink(hostPeer.connectionState),
+          )
           if (now - hostUnreachableSince >= wait) {
             hostUnreachableSince = now
+            reconnectAttempts += 1
             hardReconnect()
           }
         } else {
           hostUnreachableSince = null
+          reconnectAttempts = 0
         }
       }
       if (

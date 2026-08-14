@@ -22,7 +22,7 @@ export const SIGNALING_BLOCKED_MESSAGE =
 
 export function describeWebRtcJoinError(error: string): string {
   if (/turn|exchanging sdp|ice/i.test(error)) {
-    return 'Another player was found, but a direct connection could not form between your devices. Direct links depend on both networks cooperating, so they can work one moment and fail the next — VPNs, phone carriers, and routers with client/AP isolation are common causes. A TURN relay makes it reliable: one player adds one under “Connection help” on the home screen, then shares a fresh invite link — the link carries the relay settings to everyone who opens it.'
+    return 'Another player was found, but a connection could not form between your devices — even through the built-in TURN relay. That usually means the relay’s shared monthly quota is exhausted or this network blocks relay traffic entirely. You can add your own TURN credentials under “Connection help” on the home screen, then share a fresh invite link — the link carries the relay settings to everyone who opens it.'
   }
   return `A WebRTC peer link failed: ${error}`
 }
@@ -39,6 +39,63 @@ const EXTRA_STUN_SERVERS: TurnServerConfig[] = [
   {urls: 'stun:stun.relay.metered.ca:80'},
   {urls: 'stun:stun.nextcloud.com:443'},
 ]
+
+/**
+ * Built-in TURN relay so games connect deterministically instead of
+ * depending on NAT hole-punching luck. These are static credentials for a
+ * Metered free-tier account (20 GB/month, shared by everyone playing from
+ * this deployment; drawings and JSON are tiny). They are public by nature —
+ * this is a static site in a public repo — so if the quota is ever burned
+ * by freeloaders, rotate them in the Metered dashboard and update this
+ * list. If the relay is unreachable or exhausted, connections degrade to
+ * direct hole punching plus any player-configured TURN servers.
+ * The port-80/443 and TCP/TLS variants matter: they slip through networks
+ * that block UDP or unusual ports.
+ */
+const DEFAULT_TURN_SERVERS: TurnServerConfig[] = [
+  {
+    urls: 'turn:global.relay.metered.ca:80',
+    username: '6174fd59e7cabfa51a3707e5',
+    credential: '45OgEggvC+MGaHW8',
+  },
+  {
+    urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+    username: '6174fd59e7cabfa51a3707e5',
+    credential: '45OgEggvC+MGaHW8',
+  },
+  {
+    urls: 'turn:global.relay.metered.ca:443',
+    username: '6174fd59e7cabfa51a3707e5',
+    credential: '45OgEggvC+MGaHW8',
+  },
+  {
+    urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+    username: '6174fd59e7cabfa51a3707e5',
+    credential: '45OgEggvC+MGaHW8',
+  },
+]
+
+/**
+ * The full ICE server list for joining a room: diverse STUN, the built-in
+ * TURN relay, then any player-configured TURN servers (manual or adopted
+ * from an invite link), deduplicated. ICE simply races every server, so
+ * extras can only add paths, never remove them.
+ */
+export function turnConfigForJoin(): TurnServerConfig[] {
+  const merged: TurnServerConfig[] = []
+  const seen = new Set<string>()
+  for (const server of [
+    ...EXTRA_STUN_SERVERS,
+    ...DEFAULT_TURN_SERVERS,
+    ...(loadTurnServers() ?? []),
+  ]) {
+    const key = JSON.stringify(server)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(server)
+  }
+  return merged
+}
 
 /**
  * True when a peer's RTCPeerConnection state says the link is beyond quick
@@ -189,7 +246,6 @@ class TrysteroTransport extends BaseTransport {
 
   constructor(roomCode: string, onError: (message: string) => void) {
     super()
-    const turnConfig = loadTurnServers()
     this.room = joinRoom(
       {
         appId: 'io.github.levavakian.teleopstrations.v3',
@@ -197,9 +253,8 @@ class TrysteroTransport extends BaseTransport {
         // deterministic selection keeps several healthy relays in common
         // across all players even when a few are unreachable.
         relayConfig: {redundancy: 10},
-        // Trystero appends this to its default STUN list; TURN servers are
-        // only present when the player configured them.
-        turnConfig: [...EXTRA_STUN_SERVERS, ...(turnConfig ?? [])],
+        // Trystero appends this to its default STUN list.
+        turnConfig: turnConfigForJoin(),
       },
       `game-v3:${roomCode}`,
       {

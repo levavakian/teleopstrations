@@ -71,18 +71,24 @@ trusted party game: name-only rejoining and host-held hidden content are not
 designed to resist malicious players.
 The room creator is the permanent host and single state writer; there is no
 host election or transfer, only resume-by-rejoining from the same browser.
-The static deployment ships no TURN relay, so whether a direct link forms
-depends on both networks cooperating (phone carrier NAT is the worst case) —
-connections can succeed one attempt and fail the next. No provider offers
-credential-free TURN (`scripts/probe-turn.mjs` verifies the well-known
-"public" relays are dead), so the fix is self-service: one player pastes free
-credentials from a provider such as Metered or ExpressTURN under "Connection
-help", and invite links copied from that device carry the settings to every
-player who opens them.
+Connections try direct WebRTC first and fall back to a built-in TURN relay
+(a Metered free-tier account, 20 GB/month) when NAT hole punching fails —
+phone carrier NAT is the common case. The credentials are baked into the
+bundle and are public by nature; if the shared quota is ever exhausted by
+strangers, rotate them in the Metered dashboard and update
+`DEFAULT_TURN_SERVERS` in `src/network.ts`. Players can also supply their
+own credentials under "Connection help" (Metered, ExpressTURN, or any
+`iceServers` JSON) — invite links copied from that device carry the
+settings to every player who opens them. If the built-in relay is
+unreachable or exhausted, connections degrade to direct hole punching plus
+any player-configured servers; `scripts/probe-turn.mjs` shows how to verify
+a relay with real ICE gathering.
 To raise the odds without TURN, the app adds STUN servers across diverse
 providers and ports (80/443/3478) on top of the defaults, and clients rebuild
 their transport within seconds — instead of waiting out the silence window —
 when WebRTC itself reports the host link as dead, since every rebuild is a
-fresh hole-punching attempt.
+fresh hole-punching attempt. Fruitless rebuilds back off exponentially:
+every rejoin bursts announce events to the signaling relays, and a client
+retrying a dead room forever would otherwise trip relay rate limits.
 Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
 clears its round, while permanent deletion cannot exist without a server.
