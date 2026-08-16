@@ -17,7 +17,7 @@ import {
   type GameTransport,
 } from './network'
 import {isHostMessage, isValidWireMessage} from './protocol'
-import {loadHostState, saveHostState} from './storage'
+import {loadForceRelay, loadHostState, saveHostState} from './storage'
 import type {
   Content,
   ControlIntentRequest,
@@ -133,6 +133,12 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     let unsubscribePeers: (() => void) | null = null
     let hostUnreachableSince: number | null = null
     let reconnectAttempts = 0
+    /**
+     * Once a live host link dies mid-session, the direct path has proven
+     * unreliable for this pairing, so every rebuilt transport for the rest
+     * of the session goes relay-only: once on the relay, stay on it.
+     */
+    let relayLocked = false
     const startedAt = Date.now()
 
     const newTransport = () =>
@@ -142,6 +148,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
         (message) => {
           if (!disposed) setError(message)
         },
+        {relayOnly: relayLocked || loadForceRelay()},
       )
 
     const bindPeers = (transport: GameTransport) => {
@@ -347,14 +354,15 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
                 .snapshot()
                 .peers.find((peer) => peer.id === hostPeerId)
             : undefined
-          const wait = hardReconnectWaitMs(
-            reconnectAttempts,
-            hostPeer !== undefined &&
-              isDeadPeerLink(hostPeer.connectionState),
-          )
+          const hostLinkDead =
+            hostPeer !== undefined && isDeadPeerLink(hostPeer.connectionState)
+          const wait = hardReconnectWaitMs(reconnectAttempts, hostLinkDead)
           if (now - hostUnreachableSince >= wait) {
             hostUnreachableSince = now
             reconnectAttempts += 1
+            // A live link that died mid-session proves the direct path is
+            // unreliable for this pairing; rebuild relay-only from now on.
+            if (hostLinkDead) relayLocked = true
             hardReconnect()
           }
         } else {

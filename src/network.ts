@@ -244,7 +244,11 @@ class TrysteroTransport extends BaseTransport {
   private readonly action: MessageAction<JsonValue>
   private closed = false
 
-  constructor(roomCode: string, onError: (message: string) => void) {
+  constructor(
+    roomCode: string,
+    onError: (message: string) => void,
+    relayOnly: boolean,
+  ) {
     super()
     this.room = joinRoom(
       {
@@ -255,6 +259,12 @@ class TrysteroTransport extends BaseTransport {
         relayConfig: {redundancy: 10},
         // Trystero appends this to its default STUN list.
         turnConfig: turnConfigForJoin(),
+        // Relay-only mode excludes direct candidates entirely: used when a
+        // device opted in ("always use the relay") or after a live link
+        // died mid-session, where deterministic beats fast.
+        ...(relayOnly
+          ? {rtcConfig: {iceTransportPolicy: 'relay' as RTCIceTransportPolicy}}
+          : {}),
       },
       `game-v3:${roomCode}`,
       {
@@ -316,10 +326,11 @@ export function createTransport(
   kind: 'webrtc' | 'broadcast',
   roomCode: string,
   onError: (message: string) => void,
+  options: {relayOnly?: boolean} = {},
 ): GameTransport {
   return kind === 'broadcast'
     ? new BroadcastTransport(roomCode)
-    : new TrysteroTransport(roomCode, onError)
+    : new TrysteroTransport(roomCode, onError, options.relayOnly ?? false)
 }
 
 /**

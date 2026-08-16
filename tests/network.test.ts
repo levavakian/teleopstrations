@@ -18,8 +18,10 @@ import {
   decodeTurnParam,
   encodeTurnParam,
   hasSharedTurnServers,
+  loadForceRelay,
   loadTurnServers,
   parseTurnServers,
+  saveForceRelay,
   saveTurnServersText,
 } from '../src/storage'
 import {hardReconnectWaitMs} from '../src/useGameRoom'
@@ -89,6 +91,17 @@ describe('dead peer link detection', () => {
     expect(isDeadPeerLink('connected')).toBe(false)
     expect(isDeadPeerLink('connecting')).toBe(false)
     expect(isDeadPeerLink('new')).toBe(false)
+  })
+})
+
+describe('relay-only preference', () => {
+  it('persists the per-device always-relay opt-in', () => {
+    saveForceRelay(false)
+    expect(loadForceRelay()).toBe(false)
+    saveForceRelay(true)
+    expect(loadForceRelay()).toBe(true)
+    saveForceRelay(false)
+    expect(loadForceRelay()).toBe(false)
   })
 })
 
