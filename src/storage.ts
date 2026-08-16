@@ -211,6 +211,31 @@ export function adoptSharedTurnServers(param: string): boolean {
   }
 }
 
+const FORCE_RELAY_KEY = 'teleopstrations:v3:force-relay'
+
+/**
+ * Per-device opt-in to skip direct connections entirely and always use the
+ * TURN relay. For devices whose direct links keep dying (carrier NAT
+ * rebinding, flaky WiFi), determinism beats the latency win of a direct
+ * path.
+ */
+export function loadForceRelay(): boolean {
+  try {
+    return localStorage.getItem(FORCE_RELAY_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function saveForceRelay(value: boolean): void {
+  try {
+    if (value) localStorage.setItem(FORCE_RELAY_KEY, '1')
+    else localStorage.removeItem(FORCE_RELAY_KEY)
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 const LAST_SESSION_KEY = 'teleopstrations:v3:last-session'
 
 export interface RememberedSession {

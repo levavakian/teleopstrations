@@ -90,5 +90,11 @@ when WebRTC itself reports the host link as dead, since every rebuild is a
 fresh hole-punching attempt. Fruitless rebuilds back off exponentially:
 every rejoin bursts announce events to the signaling relays, and a client
 retrying a dead room forever would otherwise trip relay rate limits.
+In-progress drafts are host-internal: clients upload them (throttled) so the
+deadline can capture unsubmitted work, but wire states strip everyone's
+drafts — except the recipient's own in targeted sends, for reload restore —
+and draft changes broadcast nothing. Streaming every player's cumulative
+drawing to every client used to dwarf all other traffic and could saturate
+slow uplinks or burn the TURN quota.
 Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
 clears its round, while permanent deletion cannot exist without a server.

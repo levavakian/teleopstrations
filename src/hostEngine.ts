@@ -6,6 +6,7 @@ import {
   normalizeName,
   playerIdForName,
   reclaimPlayerSession,
+  redactStateForWire,
   setPlayerConnected,
   syncCursorForState,
 } from './game'
@@ -139,7 +140,7 @@ export class HostEngine {
       this.publish(
         applied.next,
         envelope.intent.type === 'draft' && !applied.stageTransitioned
-          ? 'defer'
+          ? 'silent'
           : 'now',
       )
     }
@@ -294,7 +295,9 @@ export class HostEngine {
       cursor.creatorSessionStartedAt === this.incarnation &&
       cursor.revision === this.state.revision
     if (wantState || !cursorIsCurrent) {
-      this.send(this.buildState(), peerId)
+      // Targeted send: keep this player's own draft so a reloaded tab can
+      // restore unsubmitted work; everyone else's drafts stay host-only.
+      this.send(this.buildState(player.id), peerId)
     }
   }
 
@@ -328,7 +331,7 @@ export class HostEngine {
         this.publish(
           applied.next,
           envelope.intent.type === 'draft' && !applied.stageTransitioned
-            ? 'defer'
+            ? 'silent'
             : 'now',
         )
       }
@@ -395,18 +398,24 @@ export class HostEngine {
     return {next, changed: next !== current, accepted, stageTransitioned}
   }
 
-  private publish(next: RoomState, urgency: 'now' | 'defer'): void {
+  /**
+   * 'now' broadcasts immediately, 'defer' batches into the next flush, and
+   * 'silent' persists without any broadcast — used for drafts, which are
+   * host-internal until the deadline captures them and never appear in
+   * wire states.
+   */
+  private publish(next: RoomState, urgency: 'now' | 'defer' | 'silent'): void {
     this.state = next
     this.persistState?.(next)
     this.onChange()
     if (urgency === 'now') {
       this.broadcastState()
-    } else {
+    } else if (urgency === 'defer') {
       this.broadcastDirty = true
     }
   }
 
-  private buildState(): StateMessage {
+  private buildState(keepDraftsFor?: string): StateMessage {
     return {
       v: PROTOCOL_VERSION,
       roomCode: this.roomCode,
@@ -414,7 +423,7 @@ export class HostEngine {
       incarnation: this.incarnation,
       seq: this.state.revision,
       serverTime: this.now(),
-      state: this.state,
+      state: redactStateForWire(this.state, keepDraftsFor),
     }
   }
 

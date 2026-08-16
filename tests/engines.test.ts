@@ -794,6 +794,88 @@ describe('host/client engines under flaky networks', () => {
     ).toBe(true)
   })
 
+  it('keeps drafts host-only, restores them to their owner, and captures them at the deadline', () => {
+    const {network, host, hostPlayer, clients, clientPlayers} = createHarness(
+      163,
+      RELIABLE,
+      ['Guest B', 'Guest C'],
+    )
+    network.runUntil(() => host.state.joinOrder.length === 3, 10_000)
+    host.submitLocal({
+      id: createId(),
+      senderId: hostPlayer.id,
+      sessionId: hostPlayer.sessionId,
+      intent: {type: 'start-round', expectedPhase: 'lobby', previousRoundId: null},
+    })
+    network.runUntil(
+      () => clients.every((client) => client.state?.phase === 'stage'),
+      10_000,
+    )
+
+    const [bee, cee] = clients
+    const [beePlayer] = clientPlayers
+    const revisionBefore = host.state.revision
+
+    const intent = intentForCandidate(
+      'draft',
+      bee.state!,
+      beePlayer,
+      {kind: 'text', text: 'Bee work in progress'},
+      1,
+    )
+    bee.request({
+      id: createId(),
+      senderId: beePlayer.id,
+      sessionId: beePlayer.sessionId,
+      intent: intent!,
+    })
+    expect(
+      network.runUntil(
+        () => host.state.round!.assignments[beePlayer.id].draft !== null,
+        10_000,
+      ),
+    ).toBe(true)
+
+    // The host records the draft without bumping the client-visible
+    // revision (no broadcast), and other clients never see the content.
+    expect(host.state.revision).toBe(revisionBefore)
+    network.run(3_000)
+    expect(cee.state!.round!.assignments[beePlayer.id].draft).toBeNull()
+
+    // The same person reloads mid-stage: the strictly newer session takes
+    // the seat and receives its own draft back for editor restore.
+    const rejoinedPlayer = makePlayer('Guest B', 10_000 + network.now)
+    const rejoined = new ClientEngine({
+      transport: new FakeTransport(network, 'peer-guest-b-reload'),
+      roomCode: ROOM_CODE,
+      player: rejoinedPlayer,
+      onChange: () => {},
+      now: () => network.now,
+      random: makeRng(163),
+    })
+    network.addPump((now) => rejoined.pump(now))
+    expect(
+      network.runUntil(
+        () =>
+          rejoined.state?.round?.assignments[rejoinedPlayer.id]?.draft !=
+          null,
+        10_000,
+      ),
+    ).toBe(true)
+    expect(
+      rejoined.state!.round!.assignments[rejoinedPlayer.id].draft!.content,
+    ).toEqual({kind: 'text', text: 'Bee work in progress'})
+
+    // At the deadline the host captures the draft into the book.
+    expect(
+      network.runUntil(() => host.state.round!.stageIndex === 1, 40_000),
+    ).toBe(true)
+    expect(host.state.round!.books[beePlayer.id].entries[0]).toMatchObject({
+      source: 'draft',
+      content: {kind: 'text', text: 'Bee work in progress'},
+    })
+  })
+
   it('keeps serving after the host device changes networks', () => {
     const {network, host, hostPlayer, hostTransport, clients} = createHarness(
       149,

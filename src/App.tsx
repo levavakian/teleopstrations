@@ -25,10 +25,12 @@ import {
   adoptSharedTurnServers,
   encodeTurnParam,
   hasSharedTurnServers,
+  loadForceRelay,
   loadLastSession,
   loadTurnServers,
   loadTurnServersText,
   rememberLastSession,
+  saveForceRelay,
   saveTurnServersText,
   type RememberedSession,
 } from './storage'
@@ -321,6 +323,7 @@ function ConnectionHelp({turnAdopted = false}: {turnAdopted?: boolean}) {
   const [turnText, setTurnText] = useState(() => loadTurnServersText())
   const [status, setStatus] = useState('')
   const [sharedActive, setSharedActive] = useState(() => hasSharedTurnServers())
+  const [forceRelay, setForceRelay] = useState(() => loadForceRelay())
 
   return (
     <details className="connection-help" open={turnAdopted || undefined}>
@@ -356,6 +359,24 @@ function ConnectionHelp({turnAdopted = false}: {turnAdopted?: boolean}) {
           Relay settings from an invite link are active on this device.
         </p>
       ) : null}
+      <label className="connection-help__toggle">
+        <input
+          type="checkbox"
+          checked={forceRelay}
+          onChange={(event) => {
+            saveForceRelay(event.target.checked)
+            setForceRelay(event.target.checked)
+          }}
+        />
+        <span>
+          Always use the relay on this device
+          <small>
+            Most reliable. Skips direct connections, which can drop when a
+            phone carrier or router reshuffles the network. Takes effect on
+            the next join.
+          </small>
+        </span>
+      </label>
       <label>
         TURN servers (iceServers JSON)
         <textarea
