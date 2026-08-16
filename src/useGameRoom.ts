@@ -33,6 +33,8 @@ import type {
 const ENGINE_PUMP_INTERVAL_MS = 100
 const HOST_PROBE_TIMEOUT_MS = 2_500
 const ISOLATED_PEER_WARNING_MS = 15_000
+/** Minimum spacing between draft uploads; see sendDraft below. */
+export const DRAFT_SEND_INTERVAL_MS = 800
 /**
  * If the host stays unreachable this long, the transport itself is suspect
  * (a network change can strand WebRTC links); rejoin the signaling room.
@@ -107,6 +109,20 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
   const engineRef = useRef<Engine | null>(null)
   const transportRef = useRef<GameTransport | null>(null)
   const candidateSeqRef = useRef(0)
+  const draftThrottleRef = useRef<{
+    lastSentAt: number
+    timer: number | null
+    latest: Content | null
+  }>({lastSentAt: 0, timer: null, latest: null})
+
+  useEffect(() => {
+    const throttle = draftThrottleRef.current
+    return () => {
+      if (throttle.timer !== null) window.clearTimeout(throttle.timer)
+      throttle.timer = null
+      throttle.latest = null
+    }
+  }, [config])
 
   useEffect(() => {
     let disposed = false
@@ -422,6 +438,37 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     [config.player, currentState, dispatch],
   )
 
+  /**
+   * Drafts fire on every keystroke and every stroke, and each one carries
+   * the full cumulative content, so raw sends are the biggest bandwidth
+   * cost in the game. Throttle to one send per interval with a trailing
+   * flush: the first edit goes out immediately (so the deadline capture on
+   * the host is never far behind), and the latest content always follows
+   * within the interval.
+   */
+  const sendDraft = useCallback(
+    (content: Content) => {
+      const throttle = draftThrottleRef.current
+      throttle.latest = content
+      const now = Date.now()
+      const flush = () => {
+        const latest = throttle.latest
+        throttle.latest = null
+        throttle.lastSentAt = Date.now()
+        if (latest) sendCandidate('draft', latest)
+      }
+      if (now - throttle.lastSentAt >= DRAFT_SEND_INTERVAL_MS) {
+        flush()
+      } else if (throttle.timer === null) {
+        throttle.timer = window.setTimeout(() => {
+          throttle.timer = null
+          flush()
+        }, DRAFT_SEND_INTERVAL_MS - (now - throttle.lastSentAt))
+      }
+    },
+    [sendCandidate],
+  )
+
   const sendControl = useCallback(
     (request: ControlIntentRequest) => {
       const current = currentState()
@@ -519,7 +566,7 @@ export function useGameRoom(config: RoomSessionConfig): GameRoomApi {
     creatorConnected,
     fenced,
     syncReports,
-    sendDraft: (content) => sendCandidate('draft', content),
+    sendDraft,
     submit: (content) => sendCandidate('submit', content),
     sendControl,
     leave,

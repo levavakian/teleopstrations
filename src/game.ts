@@ -433,8 +433,47 @@ function applyCandidate(
   } catch {
     return state
   }
-  next.revision += 1
+  // Drafts are host-internal (stripped from wire states), so they must not
+  // bump the client-visible revision — otherwise every keystroke would make
+  // every client's sync cursor stale and trigger full-state re-sends.
+  if (kind !== 'draft') next.revision += 1
   return next
+}
+
+/**
+ * Strips in-progress drafts before a state goes on the wire. Drafts exist so
+ * the host can capture unsubmitted work at the deadline; no client ever
+ * needs another player's draft, and cumulative drawings make drafts by far
+ * the heaviest part of the state. Broadcasting them used to multiply every
+ * stroke of every player by every connected client — the flood that burned
+ * TURN relay quota and saturated slow uplinks. A targeted state may keep
+ * exactly one player's own draft so a reloading client restores its
+ * unsubmitted work.
+ */
+export function redactStateForWire(
+  state: RoomState,
+  keepDraftsFor?: PlayerId,
+): RoomState {
+  const round = state.round
+  if (!round) return state
+  const hasForeignDraft = Object.values(round.assignments).some(
+    (assignment) => assignment.draft && assignment.playerId !== keepDraftsFor,
+  )
+  if (!hasForeignDraft) return state
+  return {
+    ...state,
+    round: {
+      ...round,
+      assignments: Object.fromEntries(
+        Object.entries(round.assignments).map(([playerId, assignment]) => [
+          playerId,
+          playerId === keepDraftsFor
+            ? assignment
+            : {...assignment, draft: null},
+        ]),
+      ),
+    },
+  }
 }
 
 function isCreatorControl(state: RoomState, senderId: PlayerId): boolean {

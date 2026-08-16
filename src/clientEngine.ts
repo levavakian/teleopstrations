@@ -267,7 +267,15 @@ export class ClientEngine {
           incarnation: hostMessage.incarnation,
           seq: hostMessage.seq,
         }
-        if (!isNewerHostState(this.adopted, stamp)) return
+        if (!isNewerHostState(this.adopted, stamp)) {
+          // Broadcast states are draft-redacted; a targeted state carrying
+          // this player's own draft shares the broadcast's revision, so the
+          // two can arrive in either order. Merging just the own draft from
+          // an equal-revision state cannot move anything backwards.
+          this.mergeOwnDraftFrom(incoming, stamp)
+          return
+        }
+        this.carryOwnDraftInto(incoming)
         this.adopted = stamp
         this.state = incoming
         this.needState = false
@@ -327,6 +335,60 @@ export class ClientEngine {
       default:
         return
     }
+  }
+
+  /**
+   * Wire states omit drafts except for a targeted state's own recipient
+   * (see redactStateForWire). When adopting a newer, draft-less state for
+   * the same stage, keep the own draft already learned so redacted
+   * broadcasts cannot erase it.
+   */
+  private carryOwnDraftInto(incoming: RoomState): void {
+    const draft = this.ownDraftOf(this.state)
+    if (!draft) return
+    const target = this.ownAssignmentSlot(incoming, this.state!)
+    if (target && !target.draft) target.draft = draft
+  }
+
+  /** Merges the own draft from an equal-revision targeted state. */
+  private mergeOwnDraftFrom(
+    incoming: RoomState,
+    stamp: {incarnation: number; seq: number},
+  ): void {
+    if (
+      !this.state ||
+      !this.adopted ||
+      this.adopted.incarnation !== stamp.incarnation ||
+      this.adopted.seq !== stamp.seq
+    ) {
+      return
+    }
+    const draft = this.ownDraftOf(incoming)
+    if (!draft) return
+    const target = this.ownAssignmentSlot(this.state, incoming)
+    if (target && !target.draft) {
+      target.draft = draft
+      this.onChange()
+    }
+  }
+
+  /** This player's current-session draft in `state`, if any. */
+  private ownDraftOf(state: RoomState | null) {
+    const draft = state?.round?.assignments[this.player.id]?.draft
+    return draft && draft.sessionId === this.player.sessionId ? draft : null
+  }
+
+  /** The own assignment in `state` when it is on the same round and stage. */
+  private ownAssignmentSlot(state: RoomState, sameStageAs: RoomState) {
+    if (
+      !state.round ||
+      !sameStageAs.round ||
+      state.round.id !== sameStageAs.round.id ||
+      state.round.stageIndex !== sameStageAs.round.stageIndex
+    ) {
+      return null
+    }
+    return state.round.assignments[this.player.id] ?? null
   }
 
   private markHostSeen(peerId: string, nowMs: number): void {

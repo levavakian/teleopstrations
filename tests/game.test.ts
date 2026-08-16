@@ -8,6 +8,7 @@ import {
   joinPlayer,
   playerIdForName,
   reclaimCreatorSession,
+  redactStateForWire,
   startRound,
 } from '../src/game'
 import {hostIncarnationOf, isNewerHostState} from '../src/protocol'
@@ -315,6 +316,87 @@ describe('book rotation and finalization', () => {
       source: 'submission',
       content: {kind: 'text', text: 'Final'},
     })
+  })
+
+  it('records drafts without bumping the client-visible revision', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    const started = startRound(state, 10_000, () => 0.999)
+    const self = sessions[0]
+
+    const drafted = applyIntent(
+      started,
+      envelope(self, {
+        type: 'draft',
+        roundId: started.round!.id,
+        stageIndex: 0,
+        candidate: candidate(self, 1, {kind: 'text', text: 'Typing…'}),
+      }),
+      11_000,
+    )
+    // The draft is recorded for deadline capture but is host-internal:
+    // no broadcast happens, so the revision must not move either.
+    expect(drafted.round!.assignments[self.id].draft?.content).toEqual({
+      kind: 'text',
+      text: 'Typing…',
+    })
+    expect(drafted.revision).toBe(started.revision)
+
+    const submitted = submitForCurrentStage(drafted, self, {
+      kind: 'text',
+      text: 'Final',
+    })
+    expect(submitted.revision).toBe(started.revision + 1)
+  })
+
+  it('strips foreign drafts from wire states but keeps the recipient’s own', () => {
+    const {state, sessions} = roomWithPlayers(3)
+    let current = startRound(state, 10_000, () => 0.999)
+    const [alpha, beta] = sessions
+
+    for (const [session, text] of [
+      [alpha, 'Alpha draft'],
+      [beta, 'Beta draft'],
+    ] as const) {
+      current = applyIntent(
+        current,
+        envelope(session, {
+          type: 'draft',
+          roundId: current.round!.id,
+          stageIndex: 0,
+          candidate: candidate(session, 1, {kind: 'text', text}),
+        }),
+        11_000,
+      )
+    }
+    current = submitForCurrentStage(current, beta, {
+      kind: 'text',
+      text: 'Beta submitted',
+    })
+
+    const broadcast = redactStateForWire(current)
+    expect(broadcast.round!.assignments[alpha.id].draft).toBeNull()
+    expect(broadcast.round!.assignments[beta.id].draft).toBeNull()
+    // Submissions are client-visible state and survive redaction.
+    expect(
+      broadcast.round!.assignments[beta.id].submission?.content,
+    ).toEqual({kind: 'text', text: 'Beta submitted'})
+
+    const targeted = redactStateForWire(current, alpha.id)
+    expect(targeted.round!.assignments[alpha.id].draft?.content).toEqual({
+      kind: 'text',
+      text: 'Alpha draft',
+    })
+    expect(targeted.round!.assignments[beta.id].draft).toBeNull()
+
+    // The redacted copy must never alias the host's canonical state.
+    expect(current.round!.assignments[alpha.id].draft?.content).toEqual({
+      kind: 'text',
+      text: 'Alpha draft',
+    })
+
+    // Without drafts to hide, the state passes through untouched.
+    const clean = advanceStage(current, 80_000)
+    expect(redactStateForWire(clean)).toBe(clean)
   })
 
   it('uses the latest synchronized draft when no submission exists', () => {
