@@ -8,7 +8,7 @@ import {DRAWING_COLORS, PEN_SIZES} from '../src/drawing'
 
 describe('landing experience', () => {
   beforeEach(() => {
-    window.history.replaceState(null, '', '/?transport=broadcast')
+    window.history.replaceState(null, '', '/')
     sessionStorage.clear()
   })
 
@@ -33,41 +33,8 @@ describe('landing experience', () => {
     await user.type(screen.getByLabelText(/^Prompt timer/), '99999')
     await user.click(screen.getByRole('button', {name: /create room/i}))
 
-    expect(
-      screen.getByRole('heading', {name: 'Gather the storytellers'}),
-    ).toBeVisible()
-  })
-})
-
-describe('connection help', () => {
-  it('saves, rejects, and clears pasted TURN settings', async () => {
-    const user = userEvent.setup()
-    localStorage.removeItem('teleopstrations:v3:turn-servers')
-    render(<App />)
-
-    await user.click(screen.getByText('Connection help'))
-    const textarea = screen.getByLabelText(/TURN servers/)
-
-    await user.click(textarea)
-    await user.paste('[{"urls": "turn:relay.example:443", "username": "u", "credential": "c"}]')
-    await user.click(screen.getByRole('button', {name: 'Save TURN settings'}))
-    expect(screen.getByText(/Saved\./)).toBeVisible()
-    expect(
-      JSON.parse(localStorage.getItem('teleopstrations:v3:turn-servers')!),
-    ).toEqual([
-      {urls: 'turn:relay.example:443', username: 'u', credential: 'c'},
-    ])
-
-    await user.clear(textarea)
-    await user.click(textarea)
-    await user.paste('nonsense')
-    await user.click(screen.getByRole('button', {name: 'Save TURN settings'}))
-    expect(screen.getByText(/not a valid TURN server list/)).toBeVisible()
-
-    await user.clear(textarea)
-    await user.click(screen.getByRole('button', {name: 'Save TURN settings'}))
-    expect(screen.getByText(/Cleared\./)).toBeVisible()
-    expect(localStorage.getItem('teleopstrations:v3:turn-servers')).toBeNull()
+    // The settings were accepted and the app is connecting to the server.
+    expect(screen.getByText('Finding room')).toBeVisible()
   })
 })
 

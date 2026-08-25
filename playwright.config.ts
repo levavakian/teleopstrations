@@ -18,10 +18,12 @@ export default defineConfig({
       use: {...devices['Desktop Chrome']},
     },
   ],
+  // End-to-end tests run against the real production stack: the node server
+  // serving the built client bundle and the /ws game endpoint.
   webServer: {
-    command: 'npm run dev -- --host 127.0.0.1 --port 4173',
-    url: 'http://127.0.0.1:4173',
+    command: 'npm run build && PORT=4173 npm run start',
+    url: 'http://127.0.0.1:4173/healthz',
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 180_000,
   },
 })

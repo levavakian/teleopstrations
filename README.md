@@ -1,100 +1,111 @@
 # Teleopstrations
 
-A serverless online drawing-and-guessing party game. Players exchange prompts,
-drawings, and descriptions directly over WebRTC; the static application is
-deployed to GitHub Pages.
+An online drawing-and-guessing party game. A lightweight Node server owns
+every room's state in memory and pushes it to players over WebSockets; the
+React client and the server deploy together as a single [Render](https://render.com)
+web service straight from this repository.
+
+## Deploy to Render
+
+The repo contains a [`render.yaml`](./render.yaml) blueprint, so no manual
+service configuration is needed:
+
+1. In the Render dashboard choose **New → Blueprint** and select this
+   repository (or open `https://dashboard.render.com/blueprints` and connect
+   the repo).
+2. Render reads `render.yaml`, creates one free-plan web service, builds with
+   `npm ci && npm run build`, and starts `npm run start`.
+3. Enable auto-deploy from `main` (on by default for blueprints); every push
+   to `main` redeploys.
+
+Notes on the in-memory design:
+
+- Rooms live only in server memory. A room with no human activity (joins or
+  game actions) for **one day** is deleted automatically.
+- Every deploy or restart starts with empty memory. The room creator's open
+  tab automatically recreates its room (same code and settings) when it
+  reconnects, and other players' tabs keep retrying until it reappears —
+  but any in-progress round is lost.
+- On the free plan, Render spins the service down after ~15 idle minutes,
+  which also wipes memory; the first visit afterwards takes a few seconds to
+  wake the service.
 
 ## Play locally
 
 ```sh
 npm install
-npm run dev
+npm run dev:server   # game server on :8787
+npm run dev          # Vite dev server (proxies /ws to :8787)
 ```
 
-Open the local URL in three or more browsers or devices. One player creates a
-room and shares its eight-character code. The production network uses
-[Trystero](https://trystero.dev/) with Nostr signaling and encrypted WebRTC data
-channels.
-
-For deterministic same-browser development without public signaling, append
-`?transport=broadcast` to the URL before creating or joining a room.
+Open the Vite URL in three or more tabs or devices. One player creates a
+room and shares its eight-character code or the invite link. To exercise the
+production stack instead, run `npm run build && npm run start` and open
+`http://localhost:8787`.
 
 ## Game flow
 
-1. The room host sets prompt and drawing deadlines and starts a round.
+1. The room creator (the admin) sets prompt and drawing deadlines and starts
+   a round.
 2. The connected roster is shuffled and frozen; later arrivals wait for the
    next round.
 3. Everyone writes an opening prompt.
-4. Books rotate through alternating drawing and description stages until every
-   frozen player has contributed to every book.
-5. Each prompt owner presents their playbook, with the room host sharing
-   reveal controls.
+4. Books rotate through alternating drawing and description stages until
+   every frozen player has contributed to every book.
+5. Each prompt owner presents their playbook, with the admin sharing reveal
+   controls.
 
-Submissions may be replaced until the deadline or until everyone has submitted,
-which advances the stage immediately. If an opening prompt is still empty, the
-game creates the configured player-name fallback. Hosts can end a round early,
-kick players between rounds, or close the room for all connected peers.
+Submissions may be replaced until the deadline or until everyone has
+submitted, which advances the stage immediately. If an opening prompt is
+still empty, the game creates the configured player-name fallback. The admin
+can force-advance a stage, end a round early, kick players between rounds,
+or close the room for everyone.
 
-The room creator's tab acts as the game server: clients talk only to it, it
-pushes ordered state updates instantly, and a 1 Hz tick keeps countdowns and
-pages aligned everywhere. If the host tab closes, rejoining the same room code
-with the same name from the same browser resumes the room exactly where it
-left off; meanwhile clients keep their work queued locally and deliver it when
-the host returns. The host can expand the player sync panel to see who is on
-the current page. Reveal pages can be exported as a single PNG playbook, and
-drawings can be opened in a full-screen viewer while writing descriptions.
+Identity is name-based: rejoining a room with the same name reclaims that
+player's seat mid-round, and rejoining with the creator's name makes you the
+admin again — from any device. The newest connection for a name always wins
+the seat; the older tab is told its seat moved. Deadlines advance on the
+server, so the game keeps moving even while the admin is offline.
+
+In-progress drafts are uploaded (throttled) so the deadline can capture
+unsubmitted work, but they stay server-side: state pushed to players never
+contains another player's draft, keeping stage traffic small. The admin can
+expand the player sync panel to see who is on the current page. Reveal pages
+can be exported as a single PNG playbook, and drawings can be opened in a
+full-screen viewer while writing descriptions.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `npm run dev` | Start the Vite development server |
-| `npm run build` | Type-check and build the static site |
+| `npm run dev` | Start the Vite development server (client) |
+| `npm run dev:server` | Start the game server with reload on change |
+| `npm run build` | Type-check, build the client bundle and the server |
+| `npm run start` | Serve the built app and the game endpoint |
 | `npm run lint` | Run ESLint |
-| `npm test` | Run unit and integration tests |
-| `npm run test:e2e` | Run multi-player browser tests |
-| `npm run preview` | Preview the production build |
+| `npm test` | Run unit and server integration tests |
+| `npm run test:e2e` | Run multi-player browser tests against the real server |
 
-## Deployment
+## Architecture
 
-`.github/workflows/deploy.yml` verifies pull requests and deploys `main` through
-GitHub Pages. The Vite production build uses `/teleopstrations/` as its base
-path. GitHub Pages must use **GitHub Actions** as its source.
+- `server/index.ts` — HTTP + WebSocket entry point: serves the built client,
+  `/healthz`, and the `/ws` game endpoint; terminates dead sockets with
+  protocol-level heartbeats.
+- `server/rooms.ts` — the room manager: applies every intent serially
+  through the shared game reducer, broadcasts redacted state on visible
+  changes, sends a 1 Hz tick (server time + player sync reports), advances
+  stage deadlines, and expires idle rooms.
+- `src/game.ts` — the pure game reducer, shared by server and client.
+- `src/serverProtocol.ts` — the WebSocket message types, shared by both.
+- `src/useGameRoom.ts` — the client: joins over WebSocket, reconnects with
+  backoff, queues intents while offline, throttles draft uploads, and keeps
+  countdowns honest with ping/pong clock sync.
 
-## Architecture and limitations
+`.github/workflows/ci.yml` lints, builds, and runs every test suite on
+pushes to `main` and on pull requests; hosting is Render's auto-deploy.
 
-The implementation plan is in [`PLAN.md`](./PLAN.md), and the host/client
-protocol, timer sync, and resume design are in [`NETWORKING.md`](./NETWORKING.md).
-There is intentionally no configured maximum player count, but browser WebRTC
-and full-state pushes impose practical device/network limits. This is a
-trusted party game: name-only rejoining and host-held hidden content are not
-designed to resist malicious players.
-The room creator is the permanent host and single state writer; there is no
-host election or transfer, only resume-by-rejoining from the same browser.
-Connections try direct WebRTC first and fall back to a built-in TURN relay
-(a Metered free-tier account, 20 GB/month) when NAT hole punching fails —
-phone carrier NAT is the common case. The credentials are baked into the
-bundle and are public by nature; if the shared quota is ever exhausted by
-strangers, rotate them in the Metered dashboard and update
-`DEFAULT_TURN_SERVERS` in `src/network.ts`. Players can also supply their
-own credentials under "Connection help" (Metered, ExpressTURN, or any
-`iceServers` JSON) — invite links copied from that device carry the
-settings to every player who opens them. If the built-in relay is
-unreachable or exhausted, connections degrade to direct hole punching plus
-any player-configured servers; `scripts/probe-turn.mjs` shows how to verify
-a relay with real ICE gathering.
-To raise the odds without TURN, the app adds STUN servers across diverse
-providers and ports (80/443/3478) on top of the defaults, and clients rebuild
-their transport within seconds — instead of waiting out the silence window —
-when WebRTC itself reports the host link as dead, since every rebuild is a
-fresh hole-punching attempt. Fruitless rebuilds back off exponentially:
-every rejoin bursts announce events to the signaling relays, and a client
-retrying a dead room forever would otherwise trip relay rate limits.
-In-progress drafts are host-internal: clients upload them (throttled) so the
-deadline can capture unsubmitted work, but wire states strip everyone's
-drafts — except the recipient's own in targeted sends, for reload restore —
-and draft changes broadcast nothing. Streaming every player's cumulative
-drawing to every client used to dwarf all other traffic and could saturate
-slow uplinks or burn the TURN quota.
-Rooms are ephemeral: closing one broadcasts a tombstone to connected peers and
-clears its round, while permanent deletion cannot exist without a server.
+This is a trusted party game: name-only identity and server-held hidden
+content are not designed to resist malicious players. There is intentionally
+no configured maximum player count, but full-state pushes impose practical
+limits. The original peer-to-peer implementation plan is preserved in
+[`PLAN.md`](./PLAN.md) for history.

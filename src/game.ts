@@ -64,15 +64,6 @@ export function isValidSettings(settings: GameSettings): boolean {
   )
 }
 
-export function hydrateRoomState(state: RoomState): RoomState {
-  return {
-    ...state,
-    protocolVersion: 3,
-    blockedPlayerIds: state.blockedPlayerIds ?? [],
-    closedAt: state.closedAt ?? null,
-  }
-}
-
 export function syncCursorForState(state: RoomState): SyncCursor {
   const creator = state.players[state.creatorId]
   return {
@@ -217,28 +208,6 @@ export function joinPlayer(
     next.joinOrder.push(session.id)
   }
 
-  next.revision += 1
-  return next
-}
-
-export function reclaimCreatorSession(
-  state: RoomState,
-  session: PlayerSession,
-  now: number = Date.now(),
-): RoomState {
-  if (session.id !== state.creatorId) return state
-  const next = copyState(state)
-  const creator = next.players[state.creatorId]
-  creator.name = session.name
-  creator.sessionId = session.sessionId
-  creator.sessionStartedAt = Math.max(
-    session.sessionStartedAt,
-    creator.sessionStartedAt + 1,
-  )
-  creator.connected = true
-  if (next.phase === 'stage' && next.round) {
-    next.round.deadline = Math.max(next.round.deadline, now + 20_000)
-  }
   next.revision += 1
   return next
 }

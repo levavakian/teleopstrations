@@ -1,9 +1,18 @@
 import react from '@vitejs/plugin-react'
 import {defineConfig} from 'vitest/config'
 
-export default defineConfig(({command}) => ({
-  base: command === 'build' ? '/teleopstrations/' : '/',
+export default defineConfig({
   plugins: [react()],
+  server: {
+    // During development the game server runs separately (npm run dev:server);
+    // the built app is served by that same server in production.
+    proxy: {
+      '/ws': {
+        target: 'ws://localhost:8787',
+        ws: true,
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     globals: true,
@@ -11,4 +20,4 @@ export default defineConfig(({command}) => ({
     setupFiles: './src/test/setup.ts',
     css: true,
   },
-}))
+})

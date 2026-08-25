@@ -21,7 +21,7 @@ async function createRoom(
   drawingSeconds = 30,
 ): Promise<{host: Page; roomCode: string}> {
   const host = await context.newPage()
-  await host.goto('/?transport=broadcast')
+  await host.goto('/')
   await host.getByLabel('Your name').fill('Host')
   await host.getByLabel(/^Prompt timer/).fill(String(promptSeconds))
   await host.getByLabel(/^Drawing timer/).fill(String(drawingSeconds))
@@ -43,9 +43,7 @@ async function joinRoom(
   expectedHeading = 'Gather the storytellers',
 ): Promise<Page> {
   const page = await context.newPage()
-  await page.goto(
-    `/?transport=broadcast#${new URLSearchParams({room: roomCode})}`,
-  )
+  await page.goto(`/#${new URLSearchParams({room: roomCode})}`)
   await page.getByLabel('Your name').fill(name)
   await page.getByRole('button', {name: /join room/i}).click()
   await expect(
@@ -66,7 +64,7 @@ async function createTrio(
   )
   const bee = await joinRoom(context, roomCode, 'Guest B')
   const cee = await joinRoom(context, roomCode, 'Guest C')
-  await expect(host.locator('.connection-pill')).toContainText('3 online')
+  await expect(host.locator('.connection-pill')).toContainText('3 players')
   return {host, bee, cee, roomCode}
 }
 
@@ -219,13 +217,18 @@ test('three players complete, reveal, and begin another round', async ({
   const openingPrompts: string[] = []
   const revealedOwners: string[] = []
   for (let bookIndex = 0; bookIndex < 3; bookIndex += 1) {
+    // Each control click round-trips to the server, so wait for the page
+    // indicator to reflect the new position before reading or clicking on.
+    await expect(host.locator('.paper-number')).toContainText('1of 3')
     const heading = host.locator('.reveal-heading h1')
     revealedOwners.push(await heading.innerText())
     openingPrompts.push(
       await host.locator('.reveal-paper blockquote').innerText(),
     )
     await host.getByRole('button', {name: 'Next page'}).click()
+    await expect(host.locator('.paper-number')).toContainText('2of 3')
     await host.getByRole('button', {name: 'Next page'}).click()
+    await expect(host.locator('.paper-number')).toContainText('3of 3')
     await host
       .getByRole('button', {
         name: bookIndex === 2 ? 'Finish the reveal →' : 'Next playbook →',
@@ -258,44 +261,34 @@ test('three players complete, reveal, and begin another round', async ({
   }
 })
 
-test('the host resumes from where it left off and queued work arrives', async ({
+test('the room keeps running while the admin is away, and rejoining by name restores admin', async ({
   context,
 }) => {
-  const {host, bee, roomCode} = await createTrio(context, 3, 3)
+  const {host, bee, roomCode} = await createTrio(context, 6, 30)
   await host.getByRole('button', {name: /shuffle & start round/i}).click()
   await expect(
     bee.getByRole('heading', {name: 'Write a secret prompt'}),
   ).toBeVisible()
 
+  // The admin vanishes mid-stage. The server keeps the round moving: the
+  // prompt deadline still fires and advances everyone to the drawing stage.
   await host.close()
   await bee
     .getByLabel(/Start this playbook/)
-    .fill('Queued while the host was offline')
+    .fill('Written while the admin was away')
   await bee.getByRole('button', {name: 'Submit prompt'}).click()
   await expect(
-    bee.getByText('Host connection interrupted', {exact: false}),
-  ).toBeVisible({timeout: 10_000})
-  await expect(
-    bee.getByRole('button', {name: 'Next stage'}),
-  ).toHaveCount(0)
+    bee.getByRole('heading', {name: 'Draw what you read'}),
+  ).toBeVisible({timeout: 15_000})
 
-  // Rejoining the same room code with the same name restores the room from
-  // this browser's saved host state, mid-round.
-  const returnedHost = await joinRoom(
-    context,
-    roomCode,
-    'Host',
-    'Write a secret prompt',
-  )
+  // Rejoining with the admin's name grants admin powers again, mid-round.
+  const returned = await joinRoom(context, roomCode, 'Host', 'Draw what you read')
   await expect(
-    returnedHost.getByRole('button', {name: 'Next stage'}),
+    returned.getByRole('button', {name: 'Next stage'}),
   ).toBeVisible()
-  await expect(returnedHost.getByText(/1 of 3 submitted/)).toBeVisible({
-    timeout: 10_000,
-  })
   await expect(
-    bee.getByText('Host connection interrupted', {exact: false}),
-  ).toHaveCount(0)
+    returned.getByRole('button', {name: 'End round'}),
+  ).toBeVisible()
 })
 
 test('a frozen player reclaims their assignment by name', async ({context}) => {
@@ -326,16 +319,16 @@ test('a frozen player reclaims their assignment by name', async ({context}) => {
   ).toHaveCount(1)
 })
 
-test('an older same-name tab cannot steal a reclaimed session back', async ({
+test('a same-name rejoin takes over the seat and tells the old tab', async ({
   context,
 }) => {
   const {host, cee, roomCode} = await createTrio(context)
   const replacement = await joinRoom(context, roomCode, 'Guest C')
 
+  // The old tab learns its seat moved; the roster shows one Guest C.
   await expect(
-    cee.getByRole('heading', {name: 'Welcome back, Guest C'}),
+    cee.getByText('now holds the seat', {exact: false}),
   ).toBeVisible()
-  await replacement.waitForTimeout(3_000)
   await expect(
     replacement.getByRole('heading', {name: 'Gather the storytellers'}),
   ).toBeVisible()
@@ -344,36 +337,10 @@ test('an older same-name tab cannot steal a reclaimed session back', async ({
   ).toHaveCount(1)
 })
 
-test('a same-name tab cannot replace an active creator session', async ({
-  context,
-}) => {
-  const {host, roomCode} = await createTrio(context)
-  const contender = await context.newPage()
-  await contender.goto(
-    `/?transport=broadcast#${new URLSearchParams({room: roomCode})}`,
-  )
-  await contender.getByLabel('Your name').fill('Host')
-  await contender.getByRole('button', {name: /join room/i}).click()
-
-  await expect(
-    contender.getByRole('heading', {name: 'Welcome back, Host'}),
-  ).toBeVisible()
-  await contender.waitForTimeout(6_000)
-  await expect(
-    contender.getByRole('heading', {name: 'Welcome back, Host'}),
-  ).toBeVisible()
-  await expect(
-    host.getByRole('button', {name: /shuffle & start round/i}),
-  ).toBeVisible()
-  await expect(
-    host.locator('.player-name').filter({hasText: /^Host/}),
-  ).toHaveCount(1)
-})
-
 test('deadlines capture drafts, preserve submissions, and keep drawing strokes', async ({
   context,
 }) => {
-  const {host, bee, cee} = await createTrio(context, 3, 3)
+  const {host, bee, cee} = await createTrio(context, 4, 4)
   await host.getByRole('button', {name: /shuffle & start round/i}).click()
 
   await host
@@ -390,7 +357,7 @@ test('deadlines capture drafts, preserve submissions, and keep drawing strokes',
   for (const page of [host, bee, cee]) {
     await expect(
       page.getByRole('heading', {name: 'Draw what you read'}),
-    ).toBeVisible({timeout: 8_000})
+    ).toBeVisible({timeout: 10_000})
   }
 
   const receivedPrompts = await Promise.all(
@@ -486,48 +453,4 @@ test('creator can kick between rounds, end early, and close the room', async ({
     ).toBeVisible()
   }
   await demoPause(host, 1_500)
-})
-
-test('invite links carry TURN relay settings to devices that open them', async ({
-  browser,
-  context,
-}) => {
-  const relay = {
-    urls: 'turn:relay.example:443',
-    username: 'user',
-    credential: 'secret',
-  }
-
-  // One player saves TURN credentials under Connection help…
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
-  const settings = await context.newPage()
-  await settings.goto('/?transport=broadcast')
-  await settings.getByText('Connection help').click()
-  await settings
-    .getByLabel(/TURN servers/)
-    .fill(JSON.stringify({iceServers: [relay]}))
-  await settings.getByRole('button', {name: 'Save TURN settings'}).click()
-  await expect(settings.getByText(/^Saved\./)).toBeVisible()
-  await settings.close()
-
-  // …then hosts a room and copies the invite link from the header.
-  const {host} = await createRoom(context)
-  await host.locator('.room-code').click()
-  await expect(host.locator('.room-code')).toContainText('Invite copied!')
-  const inviteUrl = await host.evaluate(() => navigator.clipboard.readText())
-  expect(inviteUrl).toContain('turn=')
-
-  // A separate browser profile opening that link adopts the settings
-  // without touching any configuration.
-  const guestContext = await browser.newContext()
-  const guest = await guestContext.newPage()
-  await guest.goto(inviteUrl)
-  await expect(
-    guest.getByText('Relay settings from an invite link are active'),
-  ).toBeVisible()
-  const adopted = await guest.evaluate(() =>
-    localStorage.getItem('teleopstrations:v3:turn-servers:shared'),
-  )
-  expect(JSON.parse(adopted ?? 'null')).toEqual([relay])
-  await guestContext.close()
 })

@@ -7,11 +7,9 @@ import {
   getAssignment,
   joinPlayer,
   playerIdForName,
-  reclaimCreatorSession,
   redactStateForWire,
   startRound,
 } from '../src/game'
-import {hostIncarnationOf, isNewerHostState} from '../src/protocol'
 import type {
   Candidate,
   Content,
@@ -441,9 +439,9 @@ describe('creator authority', () => {
     expect(attempted).toBe(state)
   })
 
-  it('resumes hosting under a strictly newer incarnation', () => {
+  it('lets the same name reclaim the creator seat with a newer session', () => {
     const {state, sessions} = roomWithPlayers(3)
-    const recovered = reclaimCreatorSession(state, {
+    const recovered = joinPlayer(state, {
       ...sessions[0],
       sessionId: 'creator-recovered',
       sessionStartedAt: 2_000,
@@ -453,39 +451,7 @@ describe('creator authority', () => {
     expect(recovered.players[recovered.creatorId].sessionId).toBe(
       'creator-recovered',
     )
-    expect(hostIncarnationOf(recovered)).toBeGreaterThan(
-      hostIncarnationOf(state),
-    )
-  })
-
-  it('orders host output by incarnation before sequence', () => {
-    expect(isNewerHostState(null, {incarnation: 1, seq: 0})).toBe(true)
-    expect(
-      isNewerHostState({incarnation: 1, seq: 5}, {incarnation: 1, seq: 6}),
-    ).toBe(true)
-    expect(
-      isNewerHostState({incarnation: 1, seq: 5}, {incarnation: 1, seq: 5}),
-    ).toBe(false)
-    expect(
-      isNewerHostState({incarnation: 1, seq: 5}, {incarnation: 1, seq: 4}),
-    ).toBe(false)
-    expect(
-      isNewerHostState({incarnation: 1, seq: 900}, {incarnation: 2, seq: 0}),
-    ).toBe(true)
-    expect(
-      isNewerHostState({incarnation: 2, seq: 0}, {incarnation: 1, seq: 900}),
-    ).toBe(false)
-  })
-
-  it('keeps a resumed round deadline at least twenty seconds out', () => {
-    const {state, sessions} = roomWithPlayers(3)
-    const started = startRound(state, 10_000, () => 0.999)
-    const resumed = reclaimCreatorSession(
-      started,
-      {...sessions[0], sessionId: 'next', sessionStartedAt: 2_000},
-      50_000,
-    )
-    expect(resumed.round!.deadline).toBeGreaterThanOrEqual(70_000)
+    expect(recovered.players[recovered.creatorId].connected).toBe(true)
   })
 
   it('rejects oversized client content', () => {
