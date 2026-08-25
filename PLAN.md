@@ -1,5 +1,11 @@
 # Teleopstrations implementation plan
 
+> **Historical document.** This plan describes the original serverless,
+> peer-to-peer WebRTC design. The game has since been converted to a plain
+> server/client architecture hosted on Render — see `README.md` for the
+> current design. The game rules, admin powers, and rejoin semantics below
+> still apply.
+
 ## Goal
 
 Build a static, browser-based multiplayer drawing-and-guessing game that can be

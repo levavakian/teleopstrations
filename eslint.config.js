@@ -4,18 +4,18 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  {ignores: ['coverage', 'dist', 'playwright-report', 'test-results']},
+  {ignores: ['coverage', 'dist', 'dist-server', 'playwright-report', 'test-results']},
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    // Node utility scripts that also run code inside page.evaluate.
-    files: ['scripts/**/*.mjs'],
+    // The game server runs under Node.
+    files: ['server/**/*.ts'],
     languageOptions: {
       globals: {
         console: 'readonly',
-        RTCPeerConnection: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly',
+        crypto: 'readonly',
+        process: 'readonly',
+        setInterval: 'readonly',
       },
     },
   },

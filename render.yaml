@@ -1,0 +1,16 @@
+# Render Blueprint: deploy this repo as a single web service with
+# "New > Blueprint" and pointing Render at the repository. The service
+# builds the client bundle and the game server, then serves both (static
+# assets, /healthz, and the /ws WebSocket endpoint) from one process.
+#
+# Game state lives in the server's memory: rooms expire after a day
+# without activity, and every deploy or restart starts empty.
+services:
+  - type: web
+    name: teleopstrations
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /healthz
+    autoDeploy: true

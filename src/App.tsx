@@ -22,16 +22,8 @@ import {
   syncCursorForState,
 } from './game'
 import {
-  adoptSharedTurnServers,
-  encodeTurnParam,
-  hasSharedTurnServers,
-  loadForceRelay,
   loadLastSession,
-  loadTurnServers,
-  loadTurnServersText,
   rememberLastSession,
-  saveForceRelay,
-  saveTurnServersText,
   type RememberedSession,
 } from './storage'
 import type {
@@ -48,26 +40,9 @@ import type {
 } from './types'
 import {useGameRoom} from './useGameRoom'
 
-function transportFromUrl(): 'webrtc' | 'broadcast' {
-  return new URLSearchParams(location.search).get('transport') === 'broadcast'
-    ? 'broadcast'
-    : 'webrtc'
-}
-
 function roomFromUrl(): string {
   const params = new URLSearchParams(location.hash.slice(1))
   return normalizeRoomCode(params.get('room') ?? '')
-}
-
-/**
- * Invite links may carry the sender's TURN relay settings; adopting them
- * here — before any join happens — means one player's setup reaches the
- * whole group with no manual steps on the other devices.
- */
-function adoptTurnFromUrl(): boolean {
-  const params = new URLSearchParams(location.hash.slice(1))
-  const param = params.get('turn')
-  return param ? adoptSharedTurnServers(param) : false
 }
 
 function makePlayer(name: string): PlayerSession {
@@ -94,7 +69,6 @@ function rememberSession(config: RoomSessionConfig): void {
   const remembered: RememberedSession = {
     roomCode: config.roomCode,
     name: config.player.name,
-    transportKind: config.transportKind ?? 'webrtc',
   }
   rememberLastSession(remembered)
 }
@@ -111,7 +85,6 @@ function Landing({
   onStart: (config: RoomSessionConfig) => void
 }) {
   const inviteCode = roomFromUrl()
-  const [turnAdopted] = useState(() => adoptTurnFromUrl())
   const [mode, setMode] = useState<'create' | 'join'>(
     inviteCode ? 'join' : 'create',
   )
@@ -125,7 +98,6 @@ function Landing({
   )
   const [error, setError] = useState('')
   const remembered = useMemo(() => loadLastSession(), [])
-  const transportKind = transportFromUrl()
 
   const start = (event: FormEvent) => {
     event.preventDefault()
@@ -151,7 +123,6 @@ function Landing({
         roomCode: code,
         player,
         settings,
-        transportKind,
       }
       rememberSession(config)
       setInviteUrl(code)
@@ -168,7 +139,6 @@ function Landing({
       mode,
       roomCode: code,
       player,
-      transportKind,
     }
     rememberSession(config)
     setInviteUrl(code)
@@ -181,7 +151,6 @@ function Landing({
       mode: 'join',
       roomCode: remembered.roomCode,
       player: makePlayer(remembered.name),
-      transportKind: remembered.transportKind,
     }
     rememberSession(config)
     setInviteUrl(config.roomCode)
@@ -194,8 +163,8 @@ function Landing({
         <div className="hero__eyebrow">Draw it. Guess it. Pass it on.</div>
         <h1>Teleopstrations</h1>
         <p>
-          A delightfully unreliable game of visual telephone, played directly
-          between your browsers.
+          A delightfully unreliable game of visual telephone for you and
+          your friends.
         </p>
         <div className="hero__scribble" aria-hidden="true">
           <span>cat?</span>
@@ -310,133 +279,32 @@ function Landing({
 
         <p className="privacy-note">
           <span aria-hidden="true">↔</span>
-          No account or game server. Your game travels peer-to-peer.
+          No accounts. Rooms live in server memory and expire after a day of
+          inactivity.
         </p>
-
-        <ConnectionHelp turnAdopted={turnAdopted} />
       </section>
     </main>
   )
 }
 
-function ConnectionHelp({turnAdopted = false}: {turnAdopted?: boolean}) {
-  const [turnText, setTurnText] = useState(() => loadTurnServersText())
-  const [status, setStatus] = useState('')
-  const [sharedActive, setSharedActive] = useState(() => hasSharedTurnServers())
-  const [forceRelay, setForceRelay] = useState(() => loadForceRelay())
-
-  return (
-    <details className="connection-help" open={turnAdopted || undefined}>
-      <summary>Connection help</summary>
-      <p>
-        Players discover each other through public relays and connect
-        directly when possible; when their networks won’t cooperate (VPNs,
-        phone carriers, routers with client/AP isolation), traffic falls
-        back to a built-in TURN relay, so connections should normally just
-        work.
-      </p>
-      <p>
-        The built-in relay runs on a shared free monthly quota. If
-        connections start failing for everyone, it may be exhausted — get
-        your own free credentials from a provider such as{' '}
-        <a
-          href="https://www.metered.ca/stun-turn"
-          rel="noreferrer"
-          target="_blank"
-        >
-          Metered
-        </a>{' '}
-        or{' '}
-        <a href="https://www.expressturn.com/" rel="noreferrer" target="_blank">
-          ExpressTURN
-        </a>
-        , paste the <code>iceServers</code> JSON below, and share a fresh
-        invite link. Links copied on this device carry the relay settings to
-        everyone who opens them; only one player needs to do this.
-      </p>
-      {sharedActive ? (
-        <p className="connection-help__shared" role="status">
-          Relay settings from an invite link are active on this device.
-        </p>
-      ) : null}
-      <label className="connection-help__toggle">
-        <input
-          type="checkbox"
-          checked={forceRelay}
-          onChange={(event) => {
-            saveForceRelay(event.target.checked)
-            setForceRelay(event.target.checked)
-          }}
-        />
-        <span>
-          Always use the relay on this device
-          <small>
-            Most reliable. Skips direct connections, which can drop when a
-            phone carrier or router reshuffles the network. Takes effect on
-            the next join.
-          </small>
-        </span>
-      </label>
-      <label>
-        TURN servers (iceServers JSON)
-        <textarea
-          rows={5}
-          spellCheck={false}
-          placeholder='[{"urls": "turn:relay.example.com:443", "username": "…", "credential": "…"}]'
-          value={turnText}
-          onChange={(event) => {
-            setTurnText(event.target.value)
-            setStatus('')
-          }}
-        />
-      </label>
-      <div className="connection-help__actions">
-        <span className="connection-help__status" role="status">
-          {status}
-        </span>
-        <button
-          className="button button--quiet"
-          type="button"
-          onClick={() => {
-            const result = saveTurnServersText(turnText)
-            if (result === 'invalid') {
-              setStatus('That is not a valid TURN server list.')
-              return
-            }
-            setTurnText(loadTurnServersText())
-            setSharedActive(hasSharedTurnServers())
-            setStatus(
-              result === 'saved'
-                ? 'Saved. New connections and copied invite links will use it.'
-                : 'Cleared. Direct connections only.',
-            )
-          }}
-        >
-          Save TURN settings
-        </button>
-      </div>
-    </details>
-  )
-}
-
 function ConnectionPill({
   state,
-  config,
-  peerCount,
-  kind,
+  status,
 }: {
   state: RoomState
-  config: RoomSessionConfig
-  peerCount: number
-  kind: 'webrtc' | 'broadcast'
+  status: 'connecting' | 'connected' | 'reconnecting'
 }) {
-  const self = state.players[config.player.id]
+  const online = Object.values(state.players).filter(
+    (player) => player.connected,
+  ).length
   return (
-    <div className="connection-pill" title={`${peerCount} direct peer connections`}>
-      <span className={`status-dot${self?.connected ? ' is-online' : ''}`} />
-      {kind === 'webrtc'
-        ? `WebRTC · ${peerCount} direct ${peerCount === 1 ? 'link' : 'links'}`
-        : `Local test mesh · ${peerCount + 1} online`}
+    <div className="connection-pill" title={`${online} players online`}>
+      <span
+        className={`status-dot${status === 'connected' ? ' is-online' : ''}`}
+      />
+      {status === 'connected'
+        ? `Online · ${online} ${online === 1 ? 'player' : 'players'}`
+        : 'Reconnecting…'}
     </div>
   )
 }
@@ -536,24 +404,17 @@ function CreatorSyncStatus({
 
 function RoomHeader({
   state,
-  config,
-  peerCount,
-  transportKind,
+  status,
   onExit,
 }: {
   state: RoomState
-  config: RoomSessionConfig
-  peerCount: number
-  transportKind: 'webrtc' | 'broadcast'
+  status: 'connecting' | 'connected' | 'reconnecting'
   onExit: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const copyInvite = async () => {
     const url = new URL(location.href)
-    const params = new URLSearchParams({room: state.roomCode})
-    const turnServers = loadTurnServers()
-    if (turnServers) params.set('turn', encodeTurnParam(turnServers))
-    url.hash = params.toString()
+    url.hash = new URLSearchParams({room: state.roomCode}).toString()
     let didCopy: boolean
     try {
       await navigator.clipboard.writeText(url.href)
@@ -581,12 +442,7 @@ function RoomHeader({
         Teleop<span>strations</span>
       </button>
       <div className="room-header__meta">
-        <ConnectionPill
-          state={state}
-          config={config}
-          peerCount={peerCount}
-          kind={transportKind}
-        />
+        <ConnectionPill state={state} status={status} />
         <button className="room-code" type="button" onClick={copyInvite}>
           <span>{copied ? 'Invite copied!' : 'Room code'}</span>
           <strong>{displayRoomCode(state.roomCode)}</strong>
@@ -1115,7 +971,6 @@ function Stage({
   submit,
   sendControl,
   clockOffsetMs,
-  creatorConnected,
 }: {
   state: RoomState
   config: RoomSessionConfig
@@ -1123,7 +978,6 @@ function Stage({
   submit: ReturnType<typeof useGameRoom>['submit']
   sendControl: ReturnType<typeof useGameRoom>['sendControl']
   clockOffsetMs: number
-  creatorConnected: boolean
 }) {
   const round = state.round!
   const remaining = useCountdown(round.deadline, clockOffsetMs)
@@ -1131,7 +985,6 @@ function Stage({
   const source = getAssignmentSource(state, config.player.id)
   const submittedCount = getSubmissionCount(state)
   const canAdmin = isCreatorAuthority(state, config)
-  const isCreator = canAdmin
 
   if (!assignment || isPendingPlayer(state, config.player.id)) {
     return (
@@ -1169,11 +1022,7 @@ function Stage({
         </div>
         <div className={`countdown${remaining < 10_000 ? ' is-urgent' : ''}`}>
           <span>
-            {!creatorConnected && !isCreator
-              ? 'Waiting for creator'
-              : deadlinePassed
-                ? 'Closing stage'
-                : 'Time remaining'}
+            {deadlinePassed ? 'Closing stage' : 'Time remaining'}
           </span>
           <strong>{formatCountdown(remaining)}</strong>
         </div>
@@ -1563,7 +1412,7 @@ function Room({
           </div>
           <span className="step-label">Finding room</span>
           <h1>{displayRoomCode(config.roomCode)}</h1>
-          <p>Listening for a playbook keeper on the peer-to-peer network…</p>
+          <p>Connecting to the game server…</p>
           {connection.error ? (
             <p className="form-error">{connection.error}</p>
           ) : null}
@@ -1581,45 +1430,22 @@ function Room({
 
   return (
     <div className="room-shell">
-      <RoomHeader
-        state={state}
-        config={config}
-        peerCount={connection.transport.peers.length}
-        transportKind={connection.transport.kind}
-        onExit={exit}
-      />
+      <RoomHeader state={state} status={connection.status} onExit={exit} />
       {connection.error ? (
         <div className="network-warning" role="status">
           Connection notice: {connection.error}
         </div>
       ) : null}
-      {!room.creatorConnected && !isCreatorAuthority(state, config) ? (
+      {connection.status === 'reconnecting' && !connection.error ? (
         <div className="network-warning network-warning--authority" role="status">
-          Host connection interrupted. Your work is saved on this device and
-          resent automatically as soon as the host returns.
+          Connection to the server interrupted — reconnecting. Your work is
+          kept on this device and sent as soon as the connection returns.
         </div>
       ) : null}
       {isCreatorAuthority(state, config) ? (
         <CreatorSyncStatus state={state} reports={room.syncReports} />
       ) : null}
-      {room.fenced ? (
-        <main className="connection-page connection-page--in-room">
-          <div className="connection-card room-ended-card">
-            <span className="room-ended-card__icon" aria-hidden="true">
-              ⧉
-            </span>
-            <span className="step-label">Hosting moved</span>
-            <h1>This room is now hosted from another tab</h1>
-            <p>
-              A newer tab resumed hosting this room, so this tab stopped
-              serving to avoid conflicts. Close it and keep playing there.
-            </p>
-            <button className="button button--primary" type="button" onClick={exit}>
-              Back to home
-            </button>
-          </div>
-        </main>
-      ) : state.phase === 'closed' ? (
+      {state.phase === 'closed' ? (
         <main className="connection-page connection-page--in-room">
           <div className="connection-card room-ended-card">
             <span className="room-ended-card__icon" aria-hidden="true">
@@ -1658,7 +1484,7 @@ function Room({
             </div>
             <span className="step-label">Reclaiming your seat</span>
             <h1>Welcome back, {config.player.name}</h1>
-            <p>An active peer is syncing your latest playbook and deadline.</p>
+            <p>The server is restoring your latest playbook and deadline.</p>
           </div>
         </main>
       ) : state.phase === 'lobby' ? (
@@ -1675,7 +1501,6 @@ function Room({
           submit={room.submit}
           sendControl={room.sendControl}
           clockOffsetMs={room.clockOffsetMs}
-          creatorConnected={room.creatorConnected}
         />
       ) : (
         <Reveal

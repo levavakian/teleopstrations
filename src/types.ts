@@ -188,20 +188,8 @@ export interface IntentEnvelope {
   intent: GameIntent
 }
 
-export interface TransportPeer {
-  id: string
-  connectionState: string
-}
-
-export interface TransportSnapshot {
-  kind: 'webrtc' | 'broadcast'
-  selfPeerId: string
-  peers: TransportPeer[]
-}
-
 export interface RoomConnection {
   status: 'connecting' | 'connected' | 'reconnecting'
-  transport: TransportSnapshot
   error: string | null
 }
 
@@ -210,5 +198,4 @@ export interface RoomSessionConfig {
   roomCode: string
   player: PlayerSession
   settings?: GameSettings
-  transportKind?: 'webrtc' | 'broadcast'
 }
